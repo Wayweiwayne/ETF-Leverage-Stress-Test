@@ -866,7 +866,7 @@ elif 'anchor_idx' in locals():
                           color_discrete_map={True: '#E74C3C', False: '#1ABC9C'},
                           labels={'Start_Date': '進場月份', 'Lev_Final': '期滿資產淨值 (元)',
                                   'Is_Ruined': '破產(斷頭)', 'Is_Spliced': '含未來情境拼接'})
-        st.plotly_chart(fig_hist, use_container_width=True)
+        st.plotly_chart(fig_hist, width='stretch')
         st.caption("有斜線紋路的長條 = 該起點歷史資料不足、已拼接未來 scenario 劇本，請謹慎解讀。")
 
     st.markdown("---")
@@ -962,18 +962,18 @@ elif 'anchor_idx' in locals():
                        color_discrete_map={'總資產淨值(槓桿)': '#3498DB', '總資產淨值(DCA)': '#9B59B6', '貸款剩餘餘額': '#F39C12'},
                        hover_data={'相對期數': True})
         fig1.update_xaxes(type='category')
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig1, width='stretch')
 
         st.markdown("##### 槓桿策略：每月貸款繳納資金來源拆解")
         fig2 = px.bar(df_trace, x='真實/預測月份', y=['來自配息資金池', '來自緩衝金', '變賣主資產', '本薪(自掏腰包)'],
                       color_discrete_map={'來自配息資金池': '#F1C40F', '來自緩衝金': '#2ECC71', '變賣主資產': '#3498DB', '本薪(自掏腰包)': '#E74C3C'},
                       hover_data={'相對期數': True})
         fig2.update_xaxes(type='category')
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
         st.markdown("##### 會計明細 (Accounting Trace Ledger)")
         format_dict = {c: "{:,.2f}" if ('股數' in c or '利率' in c) else "${:,.0f}" for c in df_trace.columns if c not in ['真實/預測月份', '相對期數', '破產(斷頭)']}
-        st.dataframe(df_trace.style.format(format_dict), use_container_width=True)
+        st.dataframe(df_trace.style.format(format_dict), width='stretch')
 
         csv = df_trace.to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 下載完整會計明細 (CSV)", data=csv, file_name=f"trace_進場{sel_month}.csv", mime="text/csv")
