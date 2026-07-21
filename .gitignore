@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# Claude Code 工作目錄 (含對話/記憶, 不上傳)
+.claude/
+
+# 編輯器 / 系統
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本機輸出
+*.csv
