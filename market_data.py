@@ -1,25 +1,40 @@
 """Market-data loading and calendar-month alignment, independent of the UI."""
 import time
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
 
+def validate_history(df):
+    if df is None or df.empty:
+        raise ValueError("資料來源回傳空值")
+    if not {"Close", "Dividends"}.issubset(df.columns):
+        raise ValueError("資料缺少價格或配息欄位")
+    if not isinstance(df.index, pd.DatetimeIndex) or df.index.hasnans or df.index.has_duplicates:
+        raise ValueError("行情日期格式異常或包含重複日期")
+    prices = pd.to_numeric(df['Close'], errors='coerce').dropna()
+    dividends = pd.to_numeric(df['Dividends'], errors='coerce')
+    if prices.empty or not np.isfinite(prices).all() or (prices <= 0).any():
+        raise ValueError("歷史價格為空或含無效價格")
+    if not np.isfinite(dividends).all() or (dividends < 0).any():
+        raise ValueError("配息資料含缺值或無效數值，無法可靠計算現金流")
+
+
 def load_history(ticker):
     ticker = ticker.strip().upper()
+    if not ticker:
+        raise ValueError("請輸入 Yahoo Finance 代號，例如 0056.TW、00679B.TWO 或 SPY。")
     last_error = None
     # Fetch prices and corporate actions together; a failed dividend request
     # must not silently turn an income strategy into a zero-dividend strategy.
     for attempt in range(3):
         try:
-            kwargs = {"period": "max"} if attempt < 2 else {"start": "1990-01-01"}
+            kwargs = {"period": "max"} if attempt < 2 else {"start": "1900-01-01"}
             df = yf.Ticker(ticker).history(
                 **kwargs, auto_adjust=False, actions=True, timeout=20
             )
-            if df is None or df.empty:
-                raise ValueError("資料來源回傳空值")
-            if not {"Close", "Dividends"}.issubset(df.columns):
-                raise ValueError("資料缺少價格或配息欄位")
+            validate_history(df)
             return df
         except Exception as exc:
             last_error = exc
@@ -33,7 +48,12 @@ def load_history(ticker):
 
 
 def monthly_data(df, pay_day):
+    validate_history(df)
+    if not isinstance(pay_day, (int, np.integer)) or not 1 <= pay_day <= 31:
+        raise ValueError("每月扣款日必須介於 1 至 31 日。")
     df = df.copy().sort_index()
+    df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+    df['Dividends'] = pd.to_numeric(df['Dividends'], errors='coerce')
     df.index = pd.to_datetime(df.index).tz_localize(None)
     dividends = df['Dividends'].groupby(df.index.to_period('M')).sum()
     prices = df[['Close']].dropna()

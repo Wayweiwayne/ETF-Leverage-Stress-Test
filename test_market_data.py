@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -57,7 +57,48 @@ class MarketDataTests(unittest.TestCase):
         valid = history(['2024-01-10', '2024-02-10'])
         ticker.return_value.history.side_effect = [TimeoutError(), pd.DataFrame(), valid]
         load_history('00878.TW')
-        self.assertEqual(ticker.return_value.history.call_args.kwargs['start'], '1990-01-01')
+        self.assertEqual(ticker.return_value.history.call_args.kwargs['start'], '1900-01-01')
+
+    def test_no_dividend_asset_is_supported(self):
+        result = monthly_data(history(['2024-01-10', '2024-02-10']), 10)
+        self.assertEqual(result.iloc[0]['Div_Yield'], 0)
+
+    def test_invalid_price_or_dividend_rejected(self):
+        for column, value in [('Close', float('inf')), ('Close', -1),
+                              ('Dividends', float('nan')), ('Dividends', float('inf'))]:
+            with self.subTest(column=column, value=value):
+                df = history(['2024-01-10', '2024-02-10'])
+                df.loc['2024-02-10', column] = value
+                with self.assertRaises(ValueError):
+                    monthly_data(df, 10)
+
+    def test_duplicate_dates_rejected(self):
+        with self.assertRaises(ValueError):
+            monthly_data(history(['2024-01-10', '2024-01-10']), 10)
+
+    def test_timezone_and_month_end(self):
+        df = history(['2024-01-30', '2024-02-28'])
+        df.index = df.index.tz_localize('America/New_York')
+        result = monthly_data(df, 31)
+        self.assertEqual(result.iloc[0]['Quote_Date'], pd.Timestamp('2024-02-28'))
+
+    def test_short_history_rejected(self):
+        with self.assertRaises(ValueError):
+            monthly_data(history(['2024-01-10']), 10)
+
+    @patch('market_data.yf.Ticker')
+    def test_blank_symbol_never_requests_network(self, ticker):
+        with self.assertRaises(ValueError):
+            load_history('  ')
+        ticker.assert_not_called()
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.yf.Ticker')
+    def test_symbols_not_restricted_to_specific_etfs(self, ticker, sleep):
+        ticker.return_value.history.return_value = history(['2024-01-10', '2024-02-10'])
+        for symbol in [' spy ', 'brk-b', '00679b.two', '0700.hk', '^gspc', 'btc-usd']:
+            load_history(symbol)
+            ticker.assert_called_with(symbol.strip().upper())
 
 
 if __name__ == '__main__':
