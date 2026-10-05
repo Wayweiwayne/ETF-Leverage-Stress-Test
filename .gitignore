@@ -19,3 +19,5 @@ Thumbs.db
 
 # 本機輸出
 *.csv
+
+.yf_cache/

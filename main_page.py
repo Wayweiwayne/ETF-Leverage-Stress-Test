@@ -1,5 +1,5 @@
 import streamlit as st
-import yfinance as yf
+from market_data import load_history, monthly_data, align_months
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -270,87 +270,24 @@ pmt_schedule, rate_schedule, _ = build_pmt_schedule(
 # ==========================================
 # 3. 核心資料引擎
 # ==========================================
-@st.cache_data
+@st.cache_data(ttl=3600, max_entries=64)
 def fetch_pure_asset_data(ticker, pay_day):
-    try:
-        df = yf.download(ticker, period="max", progress=False, auto_adjust=False)
-        if df.empty:
-            return f"Yahoo Finance 回傳空值。請確認代號 '{ticker}' 是否存在。"
-
-        if isinstance(df.columns, pd.MultiIndex):
-            if 'Close' in df.columns.get_level_values(0):
-                df.columns = df.columns.get_level_values(0)
-            else:
-                df.columns = df.columns.get_level_values(1)
-
-        if 'Close' not in df.columns:
-            return "找不到 Close 收盤價欄位。"
-
-        try:
-            tkr = yf.Ticker(ticker)
-            divs = tkr.dividends
-            if divs is None or divs.empty:
-                divs = pd.Series(dtype=float)
-        except Exception:
-            divs = pd.Series(dtype=float)
-
-        df = df[['Close']].copy()
-        df.index = pd.to_datetime(df.index).tz_localize(None)
-        if not divs.empty:
-            divs.index = pd.to_datetime(divs.index).tz_localize(None)
-
-        df = df.sort_index()
-        df['YYYYMM'] = df.index.to_period('M')
-
-        df['_day'] = df.index.day
-        target_idxs = []
-        for _, g in df.groupby('YYYYMM'):
-            valid = g[g['_day'] >= pay_day]
-            target_idxs.append(valid.index[0] if not valid.empty else g.index[-1])
-        monthly = df.loc[target_idxs].copy()
-        monthly = monthly.drop(columns=['_day'])
-        monthly['YYYYMM'] = monthly.index.to_period('M')
-
-        if not divs.empty:
-            divs_df = pd.DataFrame({'Div': divs})
-            divs_df['YYYYMM'] = divs_df.index.to_period('M')
-            m_divs = divs_df.groupby('YYYYMM')['Div'].sum()
-            monthly['Monthly_Div'] = monthly['YYYYMM'].map(m_divs).fillna(0.0)
-        else:
-            monthly['Monthly_Div'] = 0.0
-
-        monthly['Price_Return'] = monthly['Close'].pct_change()
-        monthly['Div_Yield'] = monthly['Monthly_Div'] / monthly['Close'].shift(1)
-        monthly['Div_Yield'] = monthly['Div_Yield'].fillna(0.0)
-
-        return monthly.dropna(subset=['Price_Return'])
-    except Exception as e:
-        import traceback
-        return f"處理 {ticker} 資料發生錯誤：\n{str(e)}\n\n```python\n{traceback.format_exc()}\n```"
+    # Exceptions propagate so unsuccessful requests are never cached.
+    return monthly_data(load_history(ticker), pay_day)
 
 
-@st.cache_data
 def prepare_unified_data(t_a, t_b, pay_day, is_reinv):
-    df_a = fetch_pure_asset_data(t_a, pay_day)
-    if isinstance(df_a, str):
-        return df_a, 0, 0
-    if df_a is None:
-        return "主標的資料獲取失敗。", 0, 0
+    try:
+        df_a = fetch_pure_asset_data(t_a.strip().upper(), pay_day)
+        df_b = fetch_pure_asset_data(t_b.strip().upper(), pay_day) if is_reinv and t_b.strip() else None
+        merged = align_months(df_a, df_b)
+        return merged, len(df_a), len(merged)
+    except ValueError as exc:
+        return str(exc), 0, 0
 
-    len_a_orig = len(df_a)
 
-    if is_reinv and t_b:
-        df_b = fetch_pure_asset_data(t_b, pay_day)
-        if isinstance(df_b, str):
-            return df_b, 0, 0
-        if df_b is None:
-            return "第二標的資料獲取失敗。", 0, 0
-        merged = df_a.join(df_b, lsuffix='_A', rsuffix='_B', how='inner')
-        return merged, len_a_orig, len(merged)
-    else:
-        df_a.columns = [f"{c}_A" if c != 'YYYYMM' else c for c in df_a.columns]
-        return df_a, len_a_orig, len_a_orig
-
+if st.sidebar.button("重新載入行情", help="清除行情快取並重新取得價格與配息。"):
+    fetch_pure_asset_data.clear()
 
 data_result = prepare_unified_data(ticker_a, ticker_b, pay_day_option, is_reinvest)
 
@@ -788,8 +725,16 @@ def run_engines(df, prin, pmt_arr, tot_p, g_p, buf_m, pmt_a_for_buf, s_mode, c_p
 if isinstance(data_result[0], str):
     st.error(f"❌ 資料獲取異常：\n\n{data_result[0]}")
 elif 'anchor_idx' in locals():
-    if merged_len < orig_len - 12:
-        st.error(f"⚠️ **歷史生存者偏差警告 (Survivorship Bias Alert)** ⚠️\n\n主標的 `{ticker_a}` 原本擁有 {orig_len} 個月的歷史資料，但為了與較晚上市的 `{ticker_b}` 進行時間軸對齊 (Inner Join)，系統被迫**裁切掉了 {orig_len - merged_len} 個月的舊資料**。\n\n這意味著您的歷史回測可能**遺漏了 2008 年金融海嘯等極端熊市**，導致勝率被樂觀高估！若要測試長線韌性，建議使用上市較久的 ETF 作為替代標的。")
+    sources = data.attrs['sources']
+    for symbol, source in zip([ticker_a, ticker_b], sources):
+        st.caption(f"{symbol}：來源價格期間 {source['source_start']} 至 {source['source_end']}（非成立／上市日期）。")
+    st.caption(f"可回測月份：{data.index[0]:%Y-%m} 至 {data.index[-1]:%Y-%m}，共 {merged_len} 個月；首個價格月份用於計算次月報酬。")
+    if merged_len < orig_len:
+        st.warning(
+            f"為使用兩檔標的共同的資料月份，主標的 {ticker_a} 的 {orig_len} 個可回測月份中，"
+            f"有 {orig_len - merged_len} 個月未納入。資料較短不代表上市較晚；"
+            "資料來源可能缺少早期紀錄。結果只涵蓋上述期間，不能代表未涵蓋期間的風險。"
+        )
 
     pmt_a_for_buf = float(pmt_schedule[grace_periods]) if grace_periods < periods else float(pmt_schedule[-1])
 
