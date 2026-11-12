@@ -1,8 +1,12 @@
 """Market-data loading, repair and calendar-month alignment, independent of the UI."""
+import json
 import os
 import re
 import sys
+import threading
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 import numpy as np
@@ -16,6 +20,21 @@ _TICKER_RE = re.compile(r"[A-Z0-9.\-^=]{1,20}")
 SNAPSHOT_DIR = os.environ.get("ETF_SNAPSHOT_DIR", os.path.join(_HERE, ".yf_cache"))
 # Optional snapshots shipped with the app; read-only, consulted last.
 SEED_DIR = os.path.join(_HERE, "data", "snapshots")
+
+# Taiwan Stock Exchange: official, but one month per request and a firewall that rejects anything
+# faster than a request every several seconds. Far too slow for a whole history, so it can only
+# bring a stored snapshot up to date when the main source is down.
+# Off unless ETF_TWSE_TOP_UP=1: from cloud hosts the firewall also refuses requests at random, and
+# the path has not yet completed end to end against the real exchange.
+TWSE_TOP_UP = os.environ.get("ETF_TWSE_TOP_UP") == "1"
+TWSE_URL = "https://www.twse.com.tw/rwd/zh"
+_TWSE_INTERVAL = 10.0
+_TWSE_ATTEMPTS = 3
+_TWSE_MAX_MONTHS = 3
+_TWSE_FRESH_DAYS = 3
+_TWSE_CACHE_SECONDS = 3600
+_twse_lock = threading.Lock()
+_twse_state = {"last_call": float("-inf"), "dividends": {}}
 
 # A split the source never back-adjusted shows up as a one-day move this large or larger.
 _SEAM_RATIO = 1.9
@@ -108,8 +127,135 @@ def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _twse_get(path, **params):
+    """One throttled request to the exchange, retried when its firewall turns it away.
+
+    The firewall rejects a share of perfectly ordinary requests from cloud addresses, so a
+    refusal is retried after the usual pause. Raises if every attempt fails or the exchange
+    answers with an error status.
+    """
+    url = f"{TWSE_URL}/{path}?" + urllib.parse.urlencode({"response": "json", **params})
+    last_error = None
+    with _twse_lock:
+        for _ in range(_TWSE_ATTEMPTS):
+            wait = _twse_state["last_call"] + _TWSE_INTERVAL - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except (OSError, ValueError) as exc:  # refused, unreachable, or the firewall's HTML page
+                last_error = exc
+            finally:
+                _twse_state["last_call"] = time.monotonic()
+        else:
+            raise ConnectionError(f"證交所沒有正常回應：{last_error}") from last_error
+    if payload.get("stat") != "OK":
+        if "沒有符合條件" in str(payload.get("stat", "")):
+            return {"fields": [], "data": []}
+        raise ValueError(f"證交所回應異常：{payload.get('stat')}")
+    return payload
+
+
+def _roc_date(text):
+    """'114/06/02' or '114年06月02日' (Republic of China calendar) -> Timestamp."""
+    year, month, day = (int(x) for x in re.findall(r"\d+", text)[:3])
+    return pd.Timestamp(year + 1911, month, day)
+
+
+def twse_month_closes(stock_no, period):
+    """Closing prices actually traded on the exchange during one calendar month."""
+    payload = _twse_get("afterTrading/STOCK_DAY", date=f"{period.year}{period.month:02d}01", stockNo=stock_no)
+    if not payload["data"]:
+        return pd.Series(dtype=float)
+    date_col, close_col = payload["fields"].index("日期"), payload["fields"].index("收盤價")
+    closes = {}
+    for row in payload["data"]:
+        try:
+            closes[_roc_date(row[date_col])] = float(str(row[close_col]).replace(",", ""))
+        except ValueError:
+            continue  # "--": listed but not traded that day
+    return pd.Series(closes, dtype=float).sort_index()
+
+
+def twse_month_distributions(period, through):
+    """Ex-dividend and ex-rights events of every listed security in one month, up to `through`.
+
+    Returns (date, code, value, kind) tuples. The exchange rejects ranges longer than about a
+    month and ranges that reach the current day.
+    """
+    end = min(period.end_time.normalize(), through)
+    cached = _twse_state["dividends"].get((period, end))
+    if cached and time.monotonic() - cached[0] < _TWSE_CACHE_SECONDS:
+        return cached[1]
+    payload = _twse_get("exRight/TWT49U", startDate=f"{period.year}{period.month:02d}01",
+                        endDate=end.strftime("%Y%m%d"))
+    events = []
+    if payload["data"]:
+        f = payload["fields"]
+        cols = [f.index(name) for name in ("資料日期", "股票代號", "權值+息值", "權/息")]
+        for row in payload["data"]:
+            date, code, value, kind = (row[c] for c in cols)
+            events.append((_roc_date(date), str(code).strip(), float(str(value).replace(",", "")), str(kind).strip()))
+    _twse_state["dividends"][(period, end)] = (time.monotonic(), events)
+    return events
+
+
+def _today():
+    return pd.Timestamp.now(tz="Asia/Taipei").tz_localize(None).normalize()
+
+
+def top_up_from_twse(snapshot, ticker):
+    """Extend a stored snapshot with exchange data. Returns the snapshot itself if there is nothing to add.
+
+    Only for Taiwan Stock Exchange listings (.TW) and gaps of a few months, and only up to the
+    previous day, the latest for which the exchange serves its distribution table. The exchange
+    and the snapshot must agree on the snapshot's last day, and a failure anywhere raises, so
+    the result is never a partial update.
+    """
+    if not ticker.endswith(".TW"):
+        return snapshot
+    stock_no = ticker[:-3]
+    last = snapshot.index.max()
+    through = _today() - pd.Timedelta(days=1)
+    if (through - last).days <= _TWSE_FRESH_DAYS:
+        return snapshot
+    months = pd.period_range(last, through, freq="M")
+    if len(months) > _TWSE_MAX_MONTHS:
+        return snapshot
+
+    closes = pd.concat([twse_month_closes(stock_no, m) for m in months])
+    if last not in closes.index or abs(closes[last] / snapshot.loc[last, "Close"] - 1) > 0.01:
+        raise ValueError("證交所與存檔在同一天的價格不一致，不合併")
+    new = closes[(closes.index > last) & (closes.index <= through)]
+    if new.empty:
+        return snapshot
+
+    added = pd.DataFrame({"Close": new, "Dividends": 0.0}, index=new.index)
+    for month in months:
+        for date, code, value, kind in twse_month_distributions(month, through):
+            if code != stock_no or date not in added.index:
+                continue
+            if kind != "息":
+                raise ValueError("補齊期間有除權，價格需要另外還原，不合併")
+            added.loc[date, "Dividends"] += value
+    if "Stock Splits" in snapshot.columns:
+        added["Stock Splits"] = 0.0
+    out = pd.concat([snapshot, added[snapshot.columns]])
+    validate_history(out)
+    out.attrs = dict(snapshot.attrs)
+    out.attrs.update(data_source="snapshot+twse", topped_up_to=new.index.max().strftime("%Y-%m-%d"))
+    return out
+
+
 def load_history(ticker):
-    """Full daily history. Falls back to the stored snapshot when the live source cannot be reached."""
+    """Full daily history.
+
+    When the live source cannot be reached, falls back to the stored snapshot, brought up to
+    date from the exchange where that is possible.
+    """
     ticker = normalize_ticker(ticker)
     last_error = None
     # Fetch prices and corporate actions together; a failed dividend request
@@ -133,7 +279,12 @@ def load_history(ticker):
                 time.sleep(attempt + 1)
     snapshot = read_snapshot(ticker)
     if snapshot is not None:
-        return snapshot
+        if not TWSE_TOP_UP:
+            return snapshot
+        try:
+            return top_up_from_twse(snapshot, ticker)
+        except Exception:
+            return snapshot  # a stale but whole snapshot beats a half-merged one
     raise ValueError(
         f"暫時無法取得 {ticker} 的完整歷史資料（已嘗試 3 次），也沒有先前存檔的資料可用。"
         "這不代表代號不存在，也可能是來源暫時異常或限制連線；"
@@ -319,6 +470,7 @@ def monthly_data(df, pay_day, repair=True):
         ticker=source.get('ticker', ''),
         data_source=source.get('data_source', 'live'),
         fetched_at=source.get('fetched_at', ''),
+        topped_up_to=source.get('topped_up_to', ''),
         source_start=df.index.min().strftime('%Y-%m-%d'),
         source_end=df.index.max().strftime('%Y-%m-%d'),
         repairs=repairs,

@@ -99,6 +99,7 @@ class PathResults:
     ruined: np.ndarray
     lev_final: np.ndarray
     dca_final: np.ndarray
+    ruin_month: np.ndarray      # month in which the payment was missed, 0 if never
     ledger: dict | None = None  # per-month arrays of shape (months, paths) when record=True
 
 
@@ -234,9 +235,11 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
                    dca_mode=DCA_MATCH_OUT_OF_POCKET, record=False):
     """Run the leveraged strategy and its no-loan comparison over every path at once.
 
-    Return/yield matrices are (months, paths); `salary_cap` has the same shape. Each month the
-    payment is collected from `order` in turn; a path that cannot cover it is ruined for good
-    and its final value is zero. With `record=True` the per-month ledger is returned as well.
+    Return/yield matrices are (months, paths); `salary_cap` has the same shape. A month's
+    dividend yield is the cash paid per share as a fraction of the previous month's price. Each
+    month the payment is collected from `order` in turn; a path that cannot cover it is ruined
+    for good and its final value is zero. With `record=True` the per-month ledger is returned
+    as well.
     """
     if dca_mode not in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT):
         raise ValueError(f"未知的 DCA 對照模式：{dca_mode}")
@@ -250,6 +253,7 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     div_pools = np.zeros(n_paths)
     buf_vals = np.full(n_paths, float(buffer_cash))
     is_ruined = np.zeros(n_paths, dtype=bool)
+    ruin_month = np.zeros(n_paths, dtype=int)
 
     dca_shares_a = np.zeros(n_paths)
     dca_shares_b = np.zeros(n_paths)
@@ -270,11 +274,12 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     for i in range(months):
         pmt = float(payments[i])
         ret_a_i = ret_a[i, :]
+        prev_a = prices_a
         prices_a = prices_a * (1 + ret_a_i)
         prices_b = prices_b * (1 + ret_b[i, :])
-        div_y = div_yield_a[i, :]
+        div_per_share = prev_a * div_yield_a[i, :]
 
-        current_div = shares_a * prices_a * div_y
+        current_div = shares_a * div_per_share
         with np.errstate(divide='ignore', invalid='ignore'):
             if reinvest:
                 shares_b = shares_b + np.where(prices_b > 0, (current_div * ratio_b * (1 - fee)) / prices_b, 0.0)
@@ -313,8 +318,9 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
             # keeps investing what salary could have covered.
             contribution = np.where(is_ruined, np.minimum(pmt, np.maximum(salary_cap[i, :], 0.0)), used[SALARY])
         is_ruined = is_ruined | defaulted
+        ruin_month[defaulted] = i + 1
 
-        dca_divs = dca_shares_a * prices_a * div_y
+        dca_divs = dca_shares_a * div_per_share
         with np.errstate(divide='ignore', invalid='ignore'):
             if reinvest:
                 dca_shares_b = dca_shares_b + np.where(prices_b > 0, (dca_divs * ratio_b * (1 - fee)) / prices_b, 0.0)
@@ -342,16 +348,20 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     lev_final[is_ruined] = 0
     if record:
         ledger = {k: np.array(v) for k, v in ledger.items()}
-    return PathResults(is_ruined, lev_final, dca_value(), ledger)
+    return PathResults(is_ruined, lev_final, dca_value(), ruin_month, ledger)
 
 
 def dividend_model_yields(price_path, p_init, base_ann_yield, beta):
-    """Dividend-beta model: payout scales with cumulative return, floored at 10% of the base amount."""
+    """Dividend-beta model: payout scales with cumulative return, floored at 10% of the base amount.
+
+    Returned as a fraction of the previous month's price, the convention simulate_paths expects.
+    """
     base_div_amt = p_init * base_ann_yield / 12.0
     cum_ret = (price_path / p_init) - 1.0
     div_amt = np.maximum(base_div_amt * 0.1, base_div_amt * (1 + cum_ret * beta))
+    previous = np.concatenate((np.full_like(price_path[:1], p_init), price_path[:-1]), axis=0)
     with np.errstate(divide='ignore', invalid='ignore'):
-        return np.where(price_path > 0, div_amt / price_path, 0.0)
+        return np.where(previous > 0, div_amt / previous, 0.0)
 
 
 def simulate_unemployment(ret_paths, full_salary, job_loss, rng):
@@ -401,7 +411,57 @@ def simulate_unemployment(ret_paths, full_salary, job_loss, rng):
     return caps
 
 
+def validate_params(p):
+    """Reject settings the simulation cannot give a meaningful answer for."""
+    def need(ok, message):
+        if not ok:
+            raise ValueError(message)
+
+    finite = np.isfinite
+    need(finite(p.principal) and p.principal > 0, "貸款本金必須大於 0。")
+    need(finite(p.annual_rate_pct) and p.annual_rate_pct >= 0, "貸款利率不可為負。")
+    need(p.annual_rate_pct + p.rate_shock_delta_pct >= 0, "升息後的利率不可為負。")
+    need(int(p.total_months) == p.total_months and p.total_months >= 1, "貸款期數至少需要 1 個月。")
+    need(0 <= p.grace_months < p.total_months, "寬限期必須短於貸款總年限。")
+    need(p.rate_shock_year >= 0 and p.buffer_months >= 0, "升息年份與緩衝月數不可為負。")
+    need(0 <= p.reinvest_ratio_b <= 1, "配息投入第二標的的比例必須介於 0 與 1。")
+    need(0 <= p.fee < 1, "手續費必須介於 0 與 100% 之間。")
+    need(finite(p.salary_cap) and p.salary_cap >= 0, "每月薪水補貼上限不可為負。")
+    need(0 <= p.haircut_penalty < 1 and p.haircut_trigger >= 0, "賤賣折價設定超出範圍。")
+    need(0 <= p.swan_drop <= 1 and p.swan_month >= 0, "黑天鵝跌幅必須介於 0 與 100% 之間。")
+    need(p.base_div_yield >= 0 and p.div_beta >= 0, "股息率與股息連動程度不可為負。")
+    need(len(p.future_annual_returns) >= 1 and all(finite(r) and r > -100 for r in p.future_annual_returns),
+         "未來情境的年度報酬率必須大於 -100%。")
+    need(1 <= p.mc_paths <= 100_000, "蒙地卡羅次數必須介於 1 與 100,000。")
+    need(p.block_size >= 1, "區塊長度至少 1 個月。")
+    need(p.dca_mode in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT), f"未知的 DCA 對照模式：{p.dca_mode}")
+    _unique_order(p.source_order)
+    job = p.job_loss
+    need(job.mode in (JOB_LOSS_NONE, JOB_LOSS_MANUAL, JOB_LOSS_RANDOM), f"未知的失業模型：{job.mode}")
+    need(job.unemployed_salary >= 0, "失業期間的薪水支援不可為負。")
+    if job.mode == JOB_LOSS_RANDOM:
+        need(0 <= job.annual_prob <= 1, "年失業機率必須介於 0 與 1。")
+        need(job.mean_duration > 0, "平均失業月數必須大於 0。")
+        need(job.distribution in ("lognormal", "poisson"), f"未知的失業時間分佈：{job.distribution}")
+        need(0 <= job.crash_extra_low <= job.crash_extra_high <= 1, "崩盤時額外失業機率的範圍不正確。")
+
+
+def bootstrap_indices(rng, n, block, months, n_paths):
+    """Row indices for a circular block bootstrap, shape (months, n_paths).
+
+    Blocks may start anywhere and wrap from the last month back to the first, so every month
+    of the record is equally likely to be drawn. Without wrapping, the first and last months
+    would appear less often than the rest.
+    """
+    blocks_needed = -(-months // block)
+    starts = rng.randint(0, n, size=(blocks_needed, n_paths))
+    idx = (starts[:, None, :] + np.arange(block)[None, :, None]) % n
+    return idx.reshape(-1, n_paths)[:months, :]
+
+
 def _future_monthly_returns(annual_returns, months):
+    if len(annual_returns) == 0:
+        raise ValueError("請至少輸入一個年度報酬率。")
     monthly = []
     for ar in annual_returns:
         monthly.extend([(1 + ar / 100.0) ** (1 / 12) - 1] * 12)
@@ -540,6 +600,7 @@ def _common_args(p, schedule, buffer_cash, ratio_b):
 
 
 def _setup(df, p):
+    validate_params(p)
     market = _prepare_market(df, p)
     schedule = build_loan_schedule(p.principal, p.annual_rate_pct, p.total_months, p.grace_months,
                                    p.rate_shock_year, p.rate_shock_delta_pct)
@@ -591,9 +652,7 @@ def run_summary(df, params):
     if mc_ok:
         rng = np.random.RandomState(p.seed)
         n_paths = int(p.mc_paths)
-        blocks_needed = (months // block) + 1
-        starts = rng.randint(0, n - block + 1, size=(blocks_needed, n_paths))
-        idx = (starts[:, None, :] + np.arange(block)[None, :, None]).reshape(-1, n_paths)[:months, :]
+        idx = bootstrap_indices(rng, n, block, months, n_paths)
 
         ret_a_mc = m.ret_a[idx] - m_disc
         ret_b_mc = m.ret_b[idx] - m_disc if m.has_b else np.zeros((months, n_paths))
@@ -615,10 +674,10 @@ def run_summary(df, params):
                             salary_cap=caps_mc, **common)
         df_mc = pd.DataFrame({
             "Is_Ruined": mc.ruined, "Lev_Final": mc.lev_final, "DCA_Final": mc.dca_final,
-            "Lev_Win": (~mc.ruined) & (mc.lev_final > mc.dca_final),
+            "Lev_Win": (~mc.ruined) & (mc.lev_final > mc.dca_final), "Ruin_Month": mc.ruin_month,
         })
     else:
-        df_mc = pd.DataFrame(columns=["Is_Ruined", "Lev_Final", "DCA_Final", "Lev_Win"])
+        df_mc = pd.DataFrame(columns=["Is_Ruined", "Lev_Final", "DCA_Final", "Lev_Win", "Ruin_Month"])
 
     return EngineResults(hist=df_hist, mc=df_mc, schedule=schedule, buffer_cash=buffer_cash,
                          block_size=block, mc_ok=mc_ok, vol_drag=float(m.decay), beta_b=float(m.beta_b),

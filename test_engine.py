@@ -109,6 +109,18 @@ class WaterfallTests(unittest.TestCase):
         np.testing.assert_allclose(res.ledger['from_dividend'][:, 0], [4_000, 4_000])
         np.testing.assert_allclose(res.ledger['from_salary'][:, 0], [6_000, 6_000])
 
+    def test_dividend_cash_does_not_depend_on_the_months_price_move(self):
+        # 10,000 shares bought at 100 with a 2% payout: 20,000 in cash whether the price then rises or falls.
+        for move in (0.5, 0.0, -0.5):
+            res = one_path([move], [25_000], (E.DIVIDEND, E.SALARY), salary_cap=1e9, div_yield=0.02)
+            self.assertAlmostEqual(res.ledger['from_dividend'][0, 0], 20_000, msg=move)
+            self.assertAlmostEqual(res.ledger['from_salary'][0, 0], 5_000, msg=move)
+
+    def test_month_of_ruin_is_recorded(self):
+        res = one_path([0.0] * 4, [3_000, 3_000, 9_000, 3_000], (E.SALARY,), salary_cap=4_000)
+        self.assertEqual(res.ruin_month[0], 3)
+        self.assertEqual(one_path([0.0] * 4, [3_000] * 4, (E.SALARY,), salary_cap=4_000).ruin_month[0], 0)
+
     def test_source_left_out_of_the_order_is_never_touched(self):
         res = one_path([0.0] * 2, [10_000] * 2, (E.SALARY,), salary_cap=4_000)
         self.assertTrue(res.ruined[0])
@@ -253,6 +265,30 @@ class RunTests(unittest.TestCase):
         pd.testing.assert_frame_equal(E.run_summary(df, params()).mc, E.run_summary(scaled, params()).mc,
                                       check_exact=False, rtol=1e-9)
 
+    def test_historical_dividends_are_paid_at_their_recorded_amount(self):
+        # Entering at month 10's price, the first dividend is month 11's yield on that entry price,
+        # however far the price moved during month 11.
+        df = market(with_b=False)
+        p = params(reinvest=False, salary_cap=1e9, source_order=(E.SALARY,), fee=0.0)
+        for anchor in (8, 11, 14):
+            trace = E.run_trace(df, p, anchor)
+            shares = 5_000_000 / df['Close_A'].iloc[anchor]
+            expected = shares * df['Div_Yield_A'].iloc[anchor + 1] * df['Close_A'].iloc[anchor]
+            cash = trace['lev_value'].iloc[0] - shares * df['Close_A'].iloc[anchor + 1]
+            self.assertAlmostEqual(cash, expected, places=4)
+        self.assertGreater(df['Div_Yield_A'].iloc[9], 0)   # the fixture does pay in the months checked
+
+    def test_modelled_dividend_yield_is_relative_to_the_previous_price(self):
+        path = np.array([[110.0], [121.0]])
+        yields = E.dividend_model_yields(path, 100.0, base_ann_yield=0.12, beta=0.0)   # 1.0 a month in cash
+        np.testing.assert_allclose(yields[:, 0], [1 / 100, 1 / 110])
+
+    def test_monte_carlo_records_when_each_path_failed(self):
+        mc = E.run_summary(market(), params(salary_cap=5_000.0)).mc
+        self.assertTrue(mc['Is_Ruined'].any() and (~mc['Is_Ruined']).any())
+        self.assertTrue(((mc['Ruin_Month'] > 0) == mc['Is_Ruined']).all())
+        self.assertTrue(mc['Ruin_Month'].between(0, 84).all())
+
     def test_fixed_seed_is_reproducible_and_seeds_differ(self):
         df = market()
         a, b = E.run(df, params(), 20).mc, E.run(df, params(), 20).mc
@@ -315,6 +351,56 @@ class RunTests(unittest.TestCase):
     def test_anchor_must_be_inside_the_data(self):
         with self.assertRaises(ValueError):
             E.run(market(), params(), 500)
+
+
+class BootstrapTests(unittest.TestCase):
+    def test_shape_and_range(self):
+        idx = E.bootstrap_indices(np.random.RandomState(0), n=50, block=12, months=84, n_paths=30)
+        self.assertEqual(idx.shape, (84, 30))
+        self.assertTrue(((idx >= 0) & (idx < 50)).all())
+
+    def test_blocks_are_consecutive_months_wrapping_at_the_end(self):
+        idx = E.bootstrap_indices(np.random.RandomState(1), n=50, block=12, months=84, n_paths=200)
+        steps = np.diff(idx, axis=0) % 50
+        within_block = np.ones(83, dtype=bool)
+        within_block[11::12] = False                       # rows where one block ends and the next begins
+        self.assertTrue((steps[within_block] == 1).all())
+        self.assertTrue((idx[:-1][within_block] == 49).any(), "some block should run past the last month")
+
+    def test_every_month_is_equally_likely_including_the_first_and_last(self):
+        idx = E.bootstrap_indices(np.random.RandomState(2), n=40, block=12, months=120, n_paths=4000)
+        counts = np.bincount(idx.ravel(), minlength=40)
+        self.assertLess(counts.max() / counts.min(), 1.06)
+        edges, middle = counts[[0, 1, 38, 39]].mean(), counts[15:25].mean()
+        self.assertAlmostEqual(edges / middle, 1.0, delta=0.03)
+
+    def test_block_longer_than_the_term_is_cut_to_the_term(self):
+        self.assertEqual(E.bootstrap_indices(np.random.RandomState(3), 30, 24, 10, 5).shape, (10, 5))
+
+
+class ValidationTests(unittest.TestCase):
+    def test_sensible_settings_pass(self):
+        E.validate_params(params())
+        E.validate_params(params(job_loss=E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=0.05)))
+
+    def test_nonsense_is_rejected_before_anything_runs(self):
+        bad = [
+            dict(principal=0), dict(principal=-5e6), dict(principal=float('nan')), dict(annual_rate_pct=-1),
+            dict(rate_shock_delta_pct=-10), dict(total_months=0), dict(grace_months=84), dict(grace_months=-1),
+            dict(reinvest_ratio_b=1.5), dict(reinvest_ratio_b=-0.1), dict(fee=1.0), dict(fee=-0.01),
+            dict(salary_cap=-1), dict(haircut_penalty=1.0), dict(swan_drop=1.5), dict(base_div_yield=-0.01),
+            dict(future_annual_returns=()), dict(future_annual_returns=(5, -100)), dict(mc_paths=0),
+            dict(mc_paths=10**7), dict(block_size=0), dict(dca_mode="all"), dict(source_order=("lottery",)),
+            dict(job_loss=E.JobLossParams(mode="sometimes")),
+            dict(job_loss=E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=1.2)),
+            dict(job_loss=E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=0.1, mean_duration=0)),
+            dict(job_loss=E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=0.1, crash_extra_low=0.5,
+                                          crash_extra_high=0.2)),
+        ]
+        df = market(n=30)
+        for overrides in bad:
+            with self.subTest(overrides), self.assertRaises(ValueError):
+                E.run_summary(df, params(**overrides))
 
 
 class SecondAssetModelTests(unittest.TestCase):

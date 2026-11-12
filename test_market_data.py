@@ -1,6 +1,8 @@
 import os
 import tempfile
 import unittest
+import unittest.mock
+import urllib.error
 from unittest.mock import patch
 
 import numpy as np
@@ -55,6 +57,11 @@ class IsolatedSnapshots(unittest.TestCase):
             patcher = patch.object(market_data, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # No test may reach the exchange; those about it replace this with canned answers.
+        patcher = patch.object(market_data, "_twse_get", side_effect=ConnectionError("no network in tests"))
+        self.twse_get = patcher.start()
+        self.addCleanup(patcher.stop)
+        market_data._twse_state["dividends"].clear()
 
 
 class MarketDataTests(IsolatedSnapshots):
@@ -403,6 +410,198 @@ class SnapshotTests(IsolatedSnapshots):
             save_snapshot(daily('2023-01-01', '2023-03-31'), '../escape')
         with self.assertRaises(ValueError):
             read_snapshot('../escape')
+
+
+def roc(ts, style="/"):
+    y, m, d = ts.year - 1911, ts.month, ts.day
+    return f"{y}/{m:02d}/{d:02d}" if style == "/" else f"{y}年{m:02d}月{d:02d}日"
+
+
+class ExchangeTopUpTests(IsolatedSnapshots):
+    """Yahoo is down; the snapshot ends 2024-03-15 and today is 2024-05-09.
+
+    The exchange serves data up to the previous day, 2024-05-08.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.truth = daily('2023-01-02', '2024-05-08', price=100.0)
+        self.ex_date = pay(self.truth, '2024-04-18', 1.5)
+        self.snapshot = self.truth[self.truth.index <= '2024-03-15'].copy()
+        self.snapshot.attrs.update(ticker='0056.TW', data_source='snapshot', fetched_at='2024-03-15T10:00:00Z')
+        patcher = patch.object(market_data, "_today", return_value=pd.Timestamp('2024-05-09'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.calls = []
+        self.twse_get.side_effect = self.answer
+        patcher = patch.object(market_data, "TWSE_TOP_UP", True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.events = [(self.ex_date, '0056', '1.500000', '息'), (self.ex_date, '2330', '4.000000', '息')]
+        self.price_shift = 1.0
+
+    def answer(self, path, **params):
+        self.calls.append((path, params))
+        if path == "afterTrading/STOCK_DAY":
+            self.assertEqual(params["stockNo"], "0056")
+            month = self.truth[self.truth.index.to_period('M') == pd.Period(params["date"][:6], 'M')]
+            rows = [[roc(ts), "1,234", "5,678", "0", "0", "0", f"{close * self.price_shift:,.2f}", "+0.1", "9", ""]
+                    for ts, close in month['Close'].items()]
+            rows.insert(1, ["113/01/01", "0", "0", "--", "--", "--", "--", "0", "0", ""])   # a no-trade day
+            if month.index.max() == self.truth.index.max():                              # today's close is already posted
+                rows.append(["113/05/09", "1", "1", "0", "0", "0", "55.55", "0", "1", ""])
+            return {"stat": "OK", "fields": ["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價",
+                                             "漲跌價差", "成交筆數", "註記"], "data": rows}
+        month = pd.Period(params["startDate"][:6], 'M')
+        self.assertEqual(params["endDate"], min(month.end_time.normalize(), pd.Timestamp('2024-05-08')).strftime("%Y%m%d"))
+        self.assertLess(params["endDate"], "20240509", "the exchange refuses a range that reaches today")
+        rows = [[roc(d, "年"), code, "名稱", "0", "0", value, kind]
+                for d, code, value, kind in self.events if d.to_period('M') == month]
+        return {"stat": "OK", "fields": ["資料日期", "股票代號", "股票名稱", "除權息前收盤價", "除權息參考價",
+                                         "權值+息值", "權/息"], "data": rows}
+
+    def test_snapshot_is_extended_with_prices_and_dividends(self):
+        out = market_data.top_up_from_twse(self.snapshot, '0056.TW')
+        self.assertEqual(out.index.max(), pd.Timestamp('2024-05-08'))
+        self.assertEqual(len(out), len(self.truth))
+        np.testing.assert_allclose(out['Close'], self.truth['Close'], atol=0.006)   # the exchange quotes two decimals
+        np.testing.assert_allclose(out['Dividends'], self.truth['Dividends'])
+        self.assertEqual((out.attrs['data_source'], out.attrs['topped_up_to'], out.attrs['fetched_at']),
+                         ('snapshot+twse', '2024-05-08', '2024-03-15T10:00:00Z'))
+        # one price request per month in the gap, one distribution request per month, nothing else
+        self.assertEqual([c[0] for c in self.calls].count("afterTrading/STOCK_DAY"), 3)
+        self.assertEqual([c[0] for c in self.calls].count("exRight/TWT49U"), 3)
+
+    def test_monthly_series_matches_a_live_download(self):
+        topped = monthly_data(market_data.top_up_from_twse(self.snapshot, '0056.TW'), 10)
+        live = monthly_data(self.truth, 10)
+        np.testing.assert_allclose(topped['Price_Return'], live['Price_Return'], atol=2e-4)
+        np.testing.assert_allclose(topped['Monthly_Div'], live['Monthly_Div'])
+        self.assertEqual(topped.attrs['topped_up_to'], '2024-05-08')
+
+    def test_distribution_table_is_fetched_once_for_several_tickers(self):
+        market_data.top_up_from_twse(self.snapshot, '0056.TW')
+        before = [c[0] for c in self.calls].count("exRight/TWT49U")
+        market_data.top_up_from_twse(self.snapshot, '0056.TW')
+        self.assertEqual([c[0] for c in self.calls].count("exRight/TWT49U"), before)
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.yf.Ticker')
+    def test_load_history_tops_up_when_the_live_source_is_down(self, ticker, sleep):
+        save_snapshot(self.snapshot, '0056.TW')
+        ticker.return_value.history.side_effect = TimeoutError()
+        out = load_history('0056.TW')
+        self.assertEqual(out.attrs['data_source'], 'snapshot+twse')
+        self.assertEqual(out.index.max(), pd.Timestamp('2024-05-08'))
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.yf.Ticker')
+    def test_blocked_exchange_leaves_the_plain_snapshot(self, ticker, sleep):
+        save_snapshot(self.snapshot, '0056.TW')
+        ticker.return_value.history.side_effect = TimeoutError()
+        self.twse_get.side_effect = [self.answer("afterTrading/STOCK_DAY", date="20240301", stockNo="0056"),
+                                     ConnectionError("HTTP 307")]
+        out = load_history('0056.TW')
+        self.assertEqual(out.attrs['data_source'], 'snapshot')
+        self.assertEqual(out.index.max(), pd.Timestamp('2024-03-15'))
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.yf.Ticker')
+    def test_exchange_is_not_contacted_unless_switched_on(self, ticker, sleep):
+        save_snapshot(self.snapshot, '0056.TW')
+        ticker.return_value.history.side_effect = TimeoutError()
+        with patch.object(market_data, "TWSE_TOP_UP", False):
+            out = load_history('0056.TW')
+        self.assertEqual(out.attrs['data_source'], 'snapshot')
+        self.assertEqual(self.calls, [])
+
+    def test_disagreement_on_the_shared_day_is_refused(self):
+        self.price_shift = 0.25    # the exchange is on a different share basis than the snapshot
+        with self.assertRaises(ValueError):
+            market_data.top_up_from_twse(self.snapshot, '0056.TW')
+
+    def test_rights_issue_in_the_gap_is_refused(self):
+        self.events.append((pd.Timestamp('2024-04-25'), '0056', '3.2', '權'))
+        with self.assertRaises(ValueError):
+            market_data.top_up_from_twse(self.snapshot, '0056.TW')
+
+    def test_nothing_is_requested_when_it_cannot_help(self):
+        cases = {
+            'other exchange': ('0056.TWO', self.snapshot),
+            'foreign ticker': ('SPY', self.snapshot),
+            'snapshot already fresh': ('0056.TW', self.truth[self.truth.index <= '2024-05-06']),
+            'snapshot from yesterday': ('0056.TW', self.truth),
+            'snapshot too old': ('0056.TW', self.truth[self.truth.index <= '2024-01-15']),
+        }
+        for name, (symbol, snapshot) in cases.items():
+            with self.subTest(name):
+                self.assertIs(market_data.top_up_from_twse(snapshot, symbol), snapshot)
+        self.assertEqual(self.calls, [])
+
+    def test_republic_calendar_dates(self):
+        self.assertEqual(market_data._roc_date('114/06/02'), pd.Timestamp('2025-06-02'))
+        self.assertEqual(market_data._roc_date('101年10月24日'), pd.Timestamp('2012-10-24'))
+
+
+class ExchangeRequestTests(unittest.TestCase):
+    def setUp(self):
+        market_data._twse_state["last_call"] = float("-inf")
+        self.addCleanup(market_data._twse_state.__setitem__, "last_call", float("-inf"))
+
+    def respond(self, body):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = body.encode("utf-8")
+        return response
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.time.monotonic')
+    @patch('market_data.urllib.request.urlopen')
+    def test_requests_are_spaced_out(self, urlopen, monotonic, sleep):
+        urlopen.return_value = self.respond('{"stat": "OK", "fields": [], "data": []}')
+        monotonic.side_effect = [100.0, 100.5, 103.0, 103.2]   # check, stamp, check, stamp
+        market_data._twse_get("afterTrading/STOCK_DAY", date="20240301", stockNo="0056")
+        sleep.assert_not_called()
+        market_data._twse_get("afterTrading/STOCK_DAY", date="20240401", stockNo="0056")
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 100.5 + market_data._TWSE_INTERVAL - 103.0)
+        url = urlopen.call_args.args[0].full_url
+        self.assertTrue(url.startswith("https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?"))
+        self.assertIn("stockNo=0056", url)
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.urllib.request.urlopen')
+    def test_no_data_is_an_empty_answer_but_other_statuses_fail(self, urlopen, sleep):
+        urlopen.return_value = self.respond('{"stat": "很抱歉，沒有符合條件的資料!"}')
+        self.assertEqual(market_data._twse_get("exRight/TWT49U", startDate="20240301", endDate="20240331")["data"], [])
+        urlopen.return_value = self.respond('{"stat": "查詢日期大於今日，請重新查詢!"}')
+        with self.assertRaises(ValueError):
+            market_data._twse_get("exRight/TWT49U", startDate="20990301", endDate="20990331")
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.urllib.request.urlopen')
+    def test_firewall_refusal_is_retried_then_reported(self, urlopen, sleep):
+        urlopen.return_value = self.respond('<html>FOR SECURITY REASONS, THIS PAGE CAN NOT BE ACCESSED.</html>')
+        with self.assertRaises(ConnectionError):
+            market_data._twse_get("afterTrading/STOCK_DAY", date="20240301", stockNo="0056")
+        self.assertEqual(urlopen.call_count, market_data._TWSE_ATTEMPTS)
+        self.assertEqual(sleep.call_count, market_data._TWSE_ATTEMPTS - 1)   # paused before every retry
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.urllib.request.urlopen')
+    def test_request_succeeds_after_a_refusal(self, urlopen, sleep):
+        refused = urllib.error.HTTPError("https://www.twse.com.tw", 307, "Temporary Redirect", None, None)
+        urlopen.side_effect = [refused, self.respond('{"stat": "OK", "fields": ["日期"], "data": [["113/03/01"]]}')]
+        self.assertEqual(market_data._twse_get("afterTrading/STOCK_DAY", date="20240301", stockNo="0056")["data"],
+                         [["113/03/01"]])
+        self.assertEqual(urlopen.call_count, 2)
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.urllib.request.urlopen')
+    def test_error_status_from_the_exchange_is_not_retried(self, urlopen, sleep):
+        urlopen.return_value = self.respond('{"stat": "查詢日期大於今日，請重新查詢!"}')
+        with self.assertRaises(ValueError):
+            market_data._twse_get("exRight/TWT49U", startDate="20990301", endDate="20990331")
+        self.assertEqual(urlopen.call_count, 1)
 
 
 def monthly(start, months, seed, ticker, dividend=0.0):

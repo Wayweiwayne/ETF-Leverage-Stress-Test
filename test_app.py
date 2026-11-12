@@ -242,6 +242,43 @@ class AppTests(unittest.TestCase):
         self.assertIn("每個起點各模擬 93 種失業時點", self.texts(at.caption))
         self.assertEqual(len(at.error), 0)
 
+    def test_same_settings_give_the_same_monte_carlo_by_default(self):
+        first = [(m.label, m.value) for m in self.start().metric]
+        st.cache_data.clear()
+        self.assertEqual([(m.label, m.value) for m in self.start().metric], first)
+        self.assertTrue(self.start().checkbox(key="seed").value)
+
+    def test_result_is_put_in_plain_words_with_its_sampling_error(self):
+        safe = self.start()
+        self.assertIn("沒有任何一種繳不出貸款", self.texts(safe.markdown))
+        risky = self.start(salary="0", swan="1", swan_m="6", swan_d="40")
+        self.assertRegex(self.texts(risky.markdown), r"大約每 \d+ 種可能的未來，就有 1 種會在中途繳不出貸款")
+        self.assertRegex(self.texts(risky.caption), r"抽樣誤差約 ±\d+\.\d 個百分點")
+        self.assertIn("把破產的也算進去（以 0 計）", self.texts(risky.caption))
+
+    def test_distribution_table_and_ruin_timing(self):
+        risky = self.start(salary="0", swan="1", swan_m="6", swan_d="40")
+        table = risky.table[0].value
+        self.assertEqual(list(table.index), ["最差的 5%", "偏差的 25%", "中位數", "偏好的 25%", "最好的 5%"])
+        self.assertEqual(list(table.columns), ["槓桿策略（破產以 0 計）", "定期定額對照組"])
+        self.assertIn("次破產的模擬裡，有一半發生在第", self.texts(risky.caption))
+        self.assertNotIn("次破產的模擬裡", self.texts(self.start().caption))
+
+    def test_dividend_assumption_is_checked_against_the_record(self):
+        self.assertNotIn("未來平均一年發多少股息", self.texts(self.start().warning))       # fixture pays about 6%
+        self.assertIn("實際平均約", self.texts(self.start(div="12").warning))
+        self.assertIn("沒有任何配息", self.texts(self.start(a="00631L.TW").warning))
+        self.assertNotIn("沒有任何配息", self.texts(self.start(a="00631L.TW", div="0").warning))
+
+    def test_empty_dividend_pool_is_pointed_out_when_dividends_are_reinvested(self):
+        self.assertIn("配息資金池不會有錢", self.texts(self.start().sidebar.caption))
+        self.assertNotIn("配息資金池不會有錢", self.texts(self.start(reinv="0").sidebar.caption))
+
+    def test_disclaimer_is_shown_even_when_data_fails(self):
+        self.assertIn("不構成任何投資建議", self.texts(self.start().caption))
+        self.load_history.side_effect = ValueError("暫時無法取得資料")
+        self.assertIn("不構成任何投資建議", self.texts(self.start().caption))
+
     def test_data_failure_is_shown_as_a_message(self):
         self.load_history.side_effect = ValueError("暫時無法取得資料")
         at = self.start()
