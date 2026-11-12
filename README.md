@@ -30,7 +30,9 @@
 - **動態配息模型**：配息隨市場榮枯起伏（Dividend Beta），並設有崩盤保底機制。
 - **還款資金瀑布**：配息池 → 緩衝金 → 變賣資產 → 本薪，依優先序動用直到破產判定。
 - **崩盤流動性折價**：大跌月份被迫賣股時額外計入賤賣損失。
-- **槓桿 ETF 波動耗損**：在假想未來段套用標準近似公式扣除來回震盪的隱藏虧損。
+- **槓桿 ETF 的複利與波動耗損**：第二標的沒有真實資料的月份，以槓桿 ETF 的標準公式由第一標的推估，且不外推歷史上的超額報酬。
+- **較長的歷史**：第一標的上市不久時，可指定一檔性質相近的標的補上市前的歷史，讓回測涵蓋 2008 年這類空頭。
+- **資料檢查與修正**：自動還原行情來源沒處理的股票分割與配息單位、提示異常值，並列出修正了什麼；來源連不上時改用最近一次的存檔。詳見 [DATA_NOTES.md](DATA_NOTES.md)。
 - **DCA 對照組**：每條路徑同時跑定期定額，比較「一次重壓 vs 分批進場」。對照組每月投入的金額，預設等於槓桿策略當月實際從薪水掏出的錢，兩邊自掏腰包的總額相同。
 - **分享連結**：網址列會自動帶著目前的所有設定，複製網址就能把同一組參數傳給別人；重新整理頁面也不會遺失設定。
 - 每個參數旁附白話問號說明，另有獨立頁面詳列公式與模型假設。
@@ -74,7 +76,7 @@ streamlit run app.py
 | 檔案 | 內容 |
 |------|------|
 | `engine.py` | 模擬引擎：貸款排程、還款資金瀑布、歷史滾動與蒙地卡羅。只用 NumPy / pandas，不依賴 Streamlit，可以單獨匯入使用。 |
-| `market_data.py` | 行情抓取、驗證與月份對齊。 |
+| `market_data.py` | 行情抓取、存檔備援、分割還原與異常檢查、月份對齊、上市前歷史回補。 |
 | `main_page.py` | 主頁畫面：收集參數、呼叫引擎、畫圖表。 |
 | `ui_state.py` | 輸入元件的預設值、上下限與網址同步。 |
 | `pages/1_Model_Details.py` | 公式與模型假設說明頁。 |
@@ -89,9 +91,10 @@ from market_data import load_history, monthly_data, align_months
 data = align_months(monthly_data(load_history("0056.TW"), 10))
 params = engine.SimParams(principal=5_000_000, annual_rate_pct=3.5, total_months=84,
                           reinvest=False, salary_cap=25_000, seed=42)
-result = engine.run(data, params, anchor_idx=0)
-print(result.mc["Is_Ruined"].mean())   # 蒙地卡羅破產率
-print(result.trace.head())             # 第一個進場月份的逐月明細
+result = engine.run_summary(data, params)
+print(result.mc["Is_Ruined"].mean())      # 蒙地卡羅破產率
+print(result.hist["Ruin_Prob"].mean())    # 歷史上每個月進場的平均破產率
+print(engine.run_trace(data, params, anchor_idx=0).head())   # 第一個進場月份的逐月明細
 ```
 
 ## 測試

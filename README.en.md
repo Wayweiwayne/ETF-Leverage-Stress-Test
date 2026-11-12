@@ -32,7 +32,9 @@ The first month in which the payment cannot be covered, the strategy is **ruined
 - **Dividend model** — payouts rise and fall with the market (dividend beta), with a floor during crashes.
 - **Repayment waterfall** — dividend pool, cash buffer, selling the asset and salary are drawn in the order you choose; any of them can be left out.
 - **Fire-sale discount** — forced selling in a crash month costs extra.
-- **Leveraged-ETF volatility decay** — applied to synthetic future months using the standard approximation.
+- **Leveraged-ETF compounding and volatility decay** — months in which the second asset has no real data are modelled from the first with the standard leveraged-fund formula, without projecting any excess return it earned in the sample.
+- **Longer history** — a recently listed asset can borrow the pre-listing record of a similar, older one, so the test covers bear markets such as 2008.
+- **Data checks and repairs** — splits and dividend units the data source left unadjusted are repaired and reported, outliers are flagged, and the last good download is used when the source is unreachable. See [DATA_NOTES.md](DATA_NOTES.md) (in Chinese).
 - **Job-loss scenarios** — a fixed window, or a random model in which unemployment becomes more likely when the market crashes.
 - **DCA comparison** — every path also runs a no-loan portfolio that invests monthly. By default it invests exactly what the leveraged strategy took from salary that month, so both sides put in the same money.
 - **Shareable links** — the address bar always carries the current settings. Copy the URL to hand someone the same scenario; a page refresh keeps your inputs.
@@ -77,7 +79,7 @@ The app opens at `http://localhost:8501`.
 | File | Contents |
 |------|----------|
 | `engine.py` | The simulation engine: loan schedule, repayment waterfall, rolling history and Monte Carlo. NumPy and pandas only, with no Streamlit dependency, so it can be imported on its own. |
-| `market_data.py` | Fetching, validating and month-aligning market data. |
+| `market_data.py` | Fetching with snapshot fallback, split repair and outlier checks, month alignment, pre-listing backfill. |
 | `main_page.py` | The main page: collects inputs, calls the engine, draws the charts. |
 | `ui_state.py` | Input defaults, bounds and URL synchronisation. |
 | `pages/1_Model_Details.py` | Formulas and model assumptions. |
@@ -92,9 +94,10 @@ from market_data import load_history, monthly_data, align_months
 data = align_months(monthly_data(load_history("0056.TW"), 10))
 params = engine.SimParams(principal=5_000_000, annual_rate_pct=3.5, total_months=84,
                           reinvest=False, salary_cap=25_000, seed=42)
-result = engine.run(data, params, anchor_idx=0)
-print(result.mc["Is_Ruined"].mean())   # Monte Carlo ruin rate
-print(result.trace.head())             # month-by-month ledger for the first entry month
+result = engine.run_summary(data, params)
+print(result.mc["Is_Ruined"].mean())      # Monte Carlo ruin rate
+print(result.hist["Ruin_Prob"].mean())    # average ruin rate over every historical entry month
+print(engine.run_trace(data, params, anchor_idx=0).head())   # ledger for the first entry month
 ```
 
 ## Tests
