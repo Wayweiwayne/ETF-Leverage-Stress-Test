@@ -2,7 +2,9 @@
 
 > 借錢投資，撐得住每月還款嗎？——一個以「破產風險」為核心的槓桿投資壓力測試系統。
 
-**🔗 線上試用：** https://etf-leverage-stress-test.streamlit.app
+**🔗 線上試用：** https://etf-leverage-stress-test.streamlit.app　｜　[English README](README.en.md)
+
+![主畫面：貸款參數、每月應繳金額，以及歷史滾動與蒙地卡羅兩個引擎的破產率](docs/images/overview.png)
 
 ---
 
@@ -29,8 +31,18 @@
 - **還款資金瀑布**：配息池 → 緩衝金 → 變賣資產 → 本薪，依優先序動用直到破產判定。
 - **崩盤流動性折價**：大跌月份被迫賣股時額外計入賤賣損失。
 - **槓桿 ETF 波動耗損**：在假想未來段套用標準近似公式扣除來回震盪的隱藏虧損。
-- **DCA 對照組**：每條路徑同時跑定期定額，比較「一次重壓 vs 分批進場」。
+- **DCA 對照組**：每條路徑同時跑定期定額，比較「一次重壓 vs 分批進場」。對照組每月投入的金額，預設等於槓桿策略當月實際從薪水掏出的錢，兩邊自掏腰包的總額相同。
+- **分享連結**：網址列會自動帶著目前的所有設定，複製網址就能把同一組參數傳給別人；重新整理頁面也不會遺失設定。
 - 每個參數旁附白話問號說明，另有獨立頁面詳列公式與模型假設。
+
+## 畫面
+
+| 歷史上每個進場月份的期滿結果 | 單一進場月份的逐月追蹤 |
+|---|---|
+| ![每個進場月份的期滿淨值長條圖，紅色為破產、斜線為拼接未來情境](docs/images/rolling-history.png) | ![資產淨值、DCA 對照組與貸款餘額的逐月走勢，以及每月還款的資金來源拆解](docs/images/ledger-trace.png) |
+
+上圖的設定可以直接用這個連結重現：
+`?a=0056.TW&salary=15000&swan=1&swan_m=18&swan_d=35&hc=1&m=2019-06`（接在網址後面）。
 
 ## 技術棧
 
@@ -56,6 +68,39 @@ streamlit run app.py
 ```
 
 瀏覽器會自動打開 `http://localhost:8501`。
+
+## 專案結構
+
+| 檔案 | 內容 |
+|------|------|
+| `engine.py` | 模擬引擎：貸款排程、還款資金瀑布、歷史滾動與蒙地卡羅。只用 NumPy / pandas，不依賴 Streamlit，可以單獨匯入使用。 |
+| `market_data.py` | 行情抓取、驗證與月份對齊。 |
+| `main_page.py` | 主頁畫面：收集參數、呼叫引擎、畫圖表。 |
+| `ui_state.py` | 輸入元件的預設值、上下限與網址同步。 |
+| `pages/1_Model_Details.py` | 公式與模型假設說明頁。 |
+| `app.py` | 進入點與頁面導覽。 |
+
+不透過畫面直接使用引擎：
+
+```python
+import engine
+from market_data import load_history, monthly_data, align_months
+
+data = align_months(monthly_data(load_history("0056.TW"), 10))
+params = engine.SimParams(principal=5_000_000, annual_rate_pct=3.5, total_months=84,
+                          reinvest=False, salary_cap=25_000, seed=42)
+result = engine.run(data, params, anchor_idx=0)
+print(result.mc["Is_Ruined"].mean())   # 蒙地卡羅破產率
+print(result.trace.head())             # 第一個進場月份的逐月明細
+```
+
+## 測試
+
+```bash
+python -m unittest -v
+```
+
+測試不需要網路：引擎以合成資料驗證，畫面測試則以假行情跑完整個 App。每次 push 都會由 GitHub Actions 自動執行（`.github/workflows/tests.yml`）。
 
 ## 免責聲明
 
