@@ -37,6 +37,7 @@ The first month in which the payment cannot be covered, the strategy is **ruined
 - **Data checks and repairs** — splits and dividend units the data source left unadjusted are repaired and reported, outliers are flagged, and the last good download is used when the source is unreachable. See [DATA_NOTES.md](DATA_NOTES.md) (in Chinese).
 - **Job-loss scenarios** — a fixed window, or a random model in which unemployment becomes more likely when the market crashes.
 - **DCA comparison** — every path also runs a no-loan portfolio that invests monthly. By default it invests exactly what the leveraged strategy took from salary that month, so both sides put in the same money.
+- **Readable results** — the ruin rate comes with a plain-language reading and its sampling error, plus the distribution of final net worth, the timing of ruin, and CSV downloads.
 - **Shareable links** — the address bar always carries the current settings. Copy the URL to hand someone the same scenario; a page refresh keeps your inputs.
 - Every input has a plain-language tooltip, and a separate page lists the formulas and model assumptions.
 
@@ -45,6 +46,8 @@ The first month in which the payment cannot be covered, the strategy is **ruined
 | Outcome for every historical entry month | Month-by-month ledger for one entry month |
 |---|---|
 | ![Bar chart of final net worth per entry month; red bars are ruined paths, hatched bars include a spliced scenario](docs/images/rolling-history.png) | ![Net worth, the DCA comparison and the loan balance over time, with the source of each month's payment](docs/images/ledger-trace.png) |
+
+![Distribution of final net worth across Monte Carlo paths, and a histogram of the month in which ruin occurred](docs/images/distribution.png)
 
 The screenshots use this scenario, which you can reproduce by appending it to the app's URL:
 `?a=0056.TW&salary=15000&swan=1&swan_m=18&swan_d=35&hc=1&m=2019-06`
@@ -84,6 +87,7 @@ The app opens at `http://localhost:8501`.
 | `ui_state.py` | Input defaults, bounds and URL synchronisation. |
 | `pages/1_Model_Details.py` | Formulas and model assumptions. |
 | `app.py` | Entry point and page navigation. |
+| `version.py` | Version label. Changes are listed in [CHANGELOG.md](CHANGELOG.md) (in Chinese). |
 
 Using the engine without the UI:
 
@@ -106,7 +110,7 @@ print(engine.run_trace(data, params, anchor_idx=0).head())   # ledger for the fi
 python -m unittest -v
 ```
 
-The tests need no network access: the engine is checked against synthetic data, and the UI tests run the whole app on stubbed market data. GitHub Actions runs them on every push (`.github/workflows/tests.yml`).
+The tests need no network access: the engine is checked against synthetic data, and the UI tests run the whole app on stubbed market data. GitHub Actions runs them on Python 3.11, 3.12 and 3.13 on every push (`.github/workflows/tests.yml`).
 
 ## Disclaimer
 
