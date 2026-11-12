@@ -7,7 +7,7 @@ import streamlit as st
 
 import engine
 import ui_state as ui
-from market_data import load_history, monthly_data, align_months
+from market_data import load_history, monthly_data, align_months, backfill_with_proxy, normalize_ticker
 
 LOAN_TYPES = ["理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"]
 # 各貸款類型的預設值：(年利率 %, 年限, 是否預設啟用寬限期)
@@ -37,15 +37,12 @@ DCA_MODES = {
     "每月投入整筆應繳金額 (舊版算法)": engine.DCA_FULL_PAYMENT,
 }
 
-_TICKER_RE = re.compile(r"[A-Z0-9.\-^=]{1,20}")
 _PATH_RE = re.compile(r"[0-9eE+\-., ]{1,200}")
+SHORT_HISTORY_MONTHS = 120
 
 
 def clean_ticker(raw):
-    value = raw.strip().upper()
-    if value and not _TICKER_RE.fullmatch(value):
-        raise ValueError(raw)
-    return value
+    return normalize_ticker(raw) if raw.strip() else ""
 
 
 def clean_path(raw):
@@ -111,6 +108,11 @@ with st.sidebar:
     st.header("2. 投資與再配置策略")
     ticker_a = ui.text("a", "第一標的 (主資產, 如 0056.TW)", "00878.TW", clean_ticker, max_chars=20,
                        help="你借來的錢主要拿去買的股票或 ETF 代號。記得加上 .TW（台股）。")
+    ticker_proxy = ui.text("proxy", "上市前的歷史用哪一檔代替 (選填)", "0056.TW", clean_ticker, max_chars=20,
+                           help="第一標的如果上市不久，歷史只涵蓋最近幾年，容易全是多頭、看不到大空頭。"
+                                "這裡可以填一檔性質相近、上市更久的標的；第一標的上市前的月份，就直接用它當時的實際漲跌與配息代替，"
+                                "讓回測與蒙地卡羅都能涵蓋更長的歷史（例如 2008 年）。"
+                                "留空代表只用第一標的自己的歷史。如果替身的歷史沒有比較長，這個欄位不會有任何作用。")
     is_reinvest = ui.checkbox("reinv", "✅ 啟用配息再投入 (配息不繳貸款)", True,
                               help="勾選後，領到的股息不拿去繳貸款，而是再買進股票滾入投資。不勾選的話，股息會先存起來幫忙繳貸款。")
     ticker_b, reinvest_ratio_b = "", 0.0
@@ -244,7 +246,15 @@ with st.sidebar:
 
     st.markdown("##### ⚙️ 槓桿 ETF 的隱藏耗損")
     enable_vol_drag = ui.checkbox("drag", "把槓桿 ETF 的「來回震盪虧損」算進去", True,
-                                  help="像正二這種槓桿型 ETF 有個隱藏小毛病：市場上上下下來回震盪時，它會悄悄虧損一點，震得越兇虧得越多——這跟最後是漲是跌無關，純粹是槓桿的數學特性。打開這個會把這種長期耗損算進去，讓模擬更貼近現實。（只作用在「假想未來」那段；真實歷史資料本身已經含這個效果，不會重複計算。）")
+                                  help="第二標的沒有真實資料的月份（它上市前，以及「假想未來」那段），系統要用第一標的的漲跌去推估它。"
+                                       "像正二這種每日調整的槓桿型 ETF，市場來回震盪時會悄悄虧損一點，但連續上漲或連續下跌時，複利又會讓它賺得比「直接乘兩倍」多、賠得比較少。"
+                                       "打開這個，推估時會用槓桿 ETF 的標準公式把這兩種效果一起算進去；關掉則單純用「第一標的漲跌 × 倍數」。"
+                                       "真實歷史資料本身已經含這些效果，不受這個開關影響。")
+
+    repair_splits = ui.checkbox("fix", "自動還原來源沒處理的股票分割", True,
+                                help="行情來源對部分台股 ETF（例如 0050、00631L、0052）的股票分割沒有完整還原，資料裡會出現單日 -75% 或 -95% 的假暴跌。"
+                                     "打開後，系統會找出這種「跳動幅度剛好是整數倍」的接縫並接回去，同時校正還沒換算的配息，結果頁上方會列出修正了什麼。"
+                                     "只有在來源完全沒有該標的的分割紀錄時才會修；有紀錄的標的（多數美股）不會被更動。")
 
     dca_label = ui.choice("dca", "定期定額對照組每月投入多少", list(DCA_MODES), list(DCA_MODES)[0],
                           help="定期定額（DCA）是「不借錢、每月慢慢買」的對照組。"
@@ -276,71 +286,114 @@ params = engine.SimParams(
 # 2. 行情資料
 # ==========================================
 @st.cache_data(ttl=3600, max_entries=64)
-def fetch_pure_asset_data(ticker, pay_day):
+def fetch_pure_asset_data(ticker, pay_day, repair):
     # Exceptions propagate so unsuccessful requests are never cached.
-    return monthly_data(load_history(ticker), pay_day)
+    return monthly_data(load_history(ticker), pay_day, repair=repair)
 
 
 @st.cache_data(ttl=3600, max_entries=32, show_spinner="模擬計算中…")
-def run_engines(df, sim_params, anchor):
-    return engine.run(df, sim_params, anchor)
+def run_summary(df, sim_params):
+    return engine.run_summary(df, sim_params)
 
 
-def prepare_unified_data(t_a, t_b, pay_day):
+@st.cache_data(ttl=3600, max_entries=64, show_spinner=False)
+def run_trace(df, sim_params, anchor):
+    return engine.run_trace(df, sim_params, anchor)
+
+
+def prepare_unified_data(t_a, t_b, t_proxy, pay_day, repair):
+    """Aligned monthly data plus the per-ticker frames it was built from, or an error message."""
     try:
-        for symbol in (t_a, t_b):
-            if symbol and not _TICKER_RE.fullmatch(symbol):
-                raise ValueError(f"代號「{symbol}」格式不正確：只能包含英數字與 . - ^ = 符號，最長 20 個字元。")
-        df_a = fetch_pure_asset_data(t_a, pay_day)
-        df_b = fetch_pure_asset_data(t_b, pay_day) if t_b else None
-        merged = align_months(df_a, df_b)
-        return merged, len(df_a), len(merged)
+        t_a = normalize_ticker(t_a)
+        t_b = normalize_ticker(t_b) if t_b else ""
+        feeds = {t_a: fetch_pure_asset_data(t_a, pay_day, repair)}
+        df_a, proxy_problem = feeds[t_a], ""
+        if t_proxy and t_proxy != t_a:
+            try:
+                feeds[t_proxy] = fetch_pure_asset_data(normalize_ticker(t_proxy), pay_day, repair)
+                df_a = backfill_with_proxy(df_a, feeds[t_proxy])
+            except ValueError as exc:
+                proxy_problem = str(exc)
+        if t_b:
+            feeds[t_b] = fetch_pure_asset_data(t_b, pay_day, repair)
+        merged = align_months(df_a, feeds.get(t_b))
+        return {"data": merged, "feeds": feeds, "backfill": df_a.attrs.get("backfill"),
+                "proxy_problem": proxy_problem}
     except ValueError as exc:
-        return str(exc), 0, 0
+        return str(exc)
 
 
 symbol_a = ticker_a.strip().upper()
 symbol_b = ticker_b.strip().upper() if is_reinvest else ""
+symbol_proxy = ticker_proxy.strip().upper()
 
-if st.sidebar.button("重新載入行情", help="清除這兩檔標的的行情快取並重新取得價格與配息。"):
-    for symbol in {symbol_a, symbol_b} - {""}:
-        fetch_pure_asset_data.clear(symbol, pay_day_option)
+if st.sidebar.button("重新載入行情", help="清除這幾檔標的的行情快取並重新取得價格與配息。"):
+    for symbol in {symbol_a, symbol_b, symbol_proxy} - {""}:
+        fetch_pure_asset_data.clear(symbol, pay_day_option, repair_splits)
 
-data_result = prepare_unified_data(symbol_a, symbol_b, pay_day_option)
+loaded = prepare_unified_data(symbol_a, symbol_b, symbol_proxy, pay_day_option, repair_splits)
 
 # ==========================================
 # 3. 結果
 # ==========================================
-if isinstance(data_result[0], str):
-    st.error(f"❌ 資料獲取異常：\n\n{data_result[0]}")
+if isinstance(loaded, str):
+    st.error(f"❌ 資料獲取異常：\n\n{loaded}")
 elif input_errors:
     st.error("❌ 參數有誤，請先修正：\n\n" + "\n\n".join(input_errors))
 else:
-    data, orig_len, merged_len = data_result
+    data, feeds, backfill = loaded["data"], loaded["feeds"], loaded["backfill"]
     avail_dates = data.index.strftime('%Y-%m').unique().tolist()
+    n_months = len(data)
 
-    st.markdown("---")
-    st.markdown("### 🎯 選擇您的進場觀測點")
-    sel_month = ui.choice(
-        "m", "基準進場月份 (錨定 MC 宇宙起點與微觀追蹤)", avail_dates,
-        '2022-01' if '2022-01' in avail_dates else avail_dates[0], by_value=True,
-        help="系統將以此月份的真實股價作為起點，計算過去的真實損益，不足的部分無縫接軌未來 Scenario 情境。"
-    )
-    anchor_idx = avail_dates.index(sel_month)
-
-    sources = data.attrs['sources']
-    for symbol, source in zip([symbol_a, symbol_b], sources):
-        st.caption(f"{symbol}：來源價格期間 {source['source_start']} 至 {source['source_end']}（非成立／上市日期）。")
-    st.caption(f"可回測月份：{data.index[0]:%Y-%m} 至 {data.index[-1]:%Y-%m}，共 {merged_len} 個月；首個價格月份用於計算次月報酬。")
-    if merged_len < orig_len:
-        st.warning(
-            f"為使用兩檔標的共同的資料月份，主標的 {symbol_a} 的 {orig_len} 個可回測月份中，"
-            f"有 {orig_len - merged_len} 個月未納入。資料較短不代表上市較晚；"
-            "資料來源可能缺少早期紀錄。結果只涵蓋上述期間，不能代表未涵蓋期間的風險。"
-        )
-
-    result = run_engines(data, params, anchor_idx)
+    result = run_summary(data, params)
     hist_res, mc_res, schedule = result.hist, result.mc, result.schedule
+
+    # ---- 資料來源與品質 ----
+    st.markdown("---")
+    n_repairs = sum(len(feed.attrs.get('repairs', [])) for feed in feeds.values())
+    n_alerts = sum(len(feed.attrs.get('anomalies', [])) for feed in feeds.values())
+    label = f"📋 使用的資料：{data.index[0]:%Y-%m} 至 {data.index[-1]:%Y-%m}，共 {n_months} 個月"
+    if n_repairs:
+        label += f"｜已自動修正 {n_repairs} 項"
+    if n_alerts:
+        label += f"｜⚠️ {n_alerts} 項提醒"
+    with st.expander(label):
+        st.caption("進場當月以該月價格買進，下個月開始繳第一期。處理方式的說明見「計算模型詳細說明」第九節。")
+        for symbol, feed in feeds.items():
+            role = "（歷史替身）" if symbol == symbol_proxy and symbol not in (symbol_a, symbol_b) else ""
+            st.caption(f"{symbol}{role}：來源價格期間 {feed.attrs['source_start']} 至 {feed.attrs['source_end']}（非成立／上市日期）。")
+            if feed.attrs.get('repairs'):
+                st.info(f"🔧 {symbol} 的來源資料有已知問題，已自動修正：\n\n" + "\n\n".join(f"- {n}" for n in feed.attrs['repairs']))
+            if feed.attrs.get('anomalies'):
+                st.warning(f"⚠️ {symbol} 的資料有不尋常的地方。系統無法判斷是來源錯誤還是真實情況，所以沒有更動，照原樣納入計算：\n\n"
+                           + "\n\n".join(f"- {n}" for n in feed.attrs['anomalies']))
+        if backfill:
+            corr = backfill['correlation']
+            corr_txt = f"兩者重疊 {backfill['overlap_months']} 個月，月報酬相關係數 {corr:.2f}。" if corr == corr else ""
+            st.caption(f"📎 {symbol_a} 在 {backfill['start']} 至 {backfill['end']} 這 {backfill['months']} 個月還沒有自己的資料，"
+                       f"以 {backfill['proxy']} 當時的實際漲跌與配息代替。{corr_txt}")
+        elif symbol_proxy and symbol_proxy != symbol_a and not loaded["proxy_problem"]:
+            st.caption(f"📎 替身 {symbol_proxy} 的歷史沒有比 {symbol_a} 更早（或中間有缺口），所以沒有用到。")
+        if result.modelled_b_months:
+            first_real = data.index[result.modelled_b_months]
+            st.caption(f"📎 {symbol_b} 在 {first_real:%Y-%m} 之前沒有資料，這 {result.modelled_b_months} 個月用「第一標的漲跌 × {result.beta_b:.2f} 倍」推估"
+                       "（倍數由兩者重疊期間估出；不假設它會持續贏過或輸給這個倍數）。")
+
+    for symbol, feed in feeds.items():
+        if feed.attrs.get('data_source') == 'snapshot':
+            saved = (feed.attrs.get('fetched_at') or '')[:10] or '先前'
+            st.warning(f"⚠️ {symbol}：即時行情暫時無法取得，目前使用 {saved} 存檔的資料，最新的價格與配息可能沒有包含在內。"
+                       "可以稍後按側欄的「重新載入行情」再試一次。")
+    if backfill and backfill['correlation'] == backfill['correlation'] and backfill['correlation'] < 0.6:
+        st.warning(f"⚠️ {symbol_a} 與替身 {backfill['proxy']} 在重疊的 {backfill['overlap_months']} 個月裡，月報酬相關係數只有 {backfill['correlation']:.2f}，"
+                   "兩者走勢差異不小，替身可能不適合，建議換一檔性質更接近的。")
+    if loaded["proxy_problem"]:
+        st.warning(f"⚠️ 替身 {symbol_proxy} 的資料無法使用，改為只用 {symbol_a} 自己的歷史。原因：{loaded['proxy_problem']}")
+    if n_months < SHORT_HISTORY_MONTHS:
+        hint = ("可以在側欄「上市前的歷史用哪一檔代替」填一檔性質相近、上市更久的標的（例如 0056.TW 或 0050.TW）。"
+                if not backfill else "")
+        st.warning(f"⚠️ 可用的歷史只有 {n_months} 個月（不到 10 年），很可能沒有涵蓋完整的空頭循環，破產機率容易被低估。{hint}")
+
     pmt_after_grace = float(schedule.payments[grace_periods])
 
     col1, col2, col3 = st.columns(3)
@@ -356,7 +409,7 @@ else:
     if enable_dyn_haircut:
         active_flags.append(f"動態折價(跌>{int(haircut_trigger*100)}% 加扣{haircut_penalty*100:.1f}%)")
     if result.vol_drag > 0:
-        active_flags.append(f"Vol Drag(月扣{result.vol_drag*100:.3f}%)")
+        active_flags.append(f"槓桿波動耗損(持平月份每月 -{result.vol_drag*100:.3f}%)")
     if enable_job_loss:
         if job_loss.mode == engine.JOB_LOSS_RANDOM:
             crash_txt = f" 崩盤(跌>{int(jl_crash_thr*100)}%)加+{int(jl_crash_lo*100)}~{int(jl_crash_hi*100)}%" if jl_crash_on else ""
@@ -378,27 +431,33 @@ else:
 
     c1, c2 = st.columns(2)
     c1.markdown("#### 【實證】歷史滾動與情境拼接宇宙")
-    c1.caption("基於過去真實軌跡拼接未來情境，測算特定時間點進場的「確定性 What-If」結果。")
+    c1.caption("把歷史上每個月都當成進場點，之後照真實走勢走；真實資料不夠長的部分接上未來情境，得到「如果當時進場會怎樣」的結果。")
     if not hist_res.empty:
         n_total = len(hist_res)
         n_spliced = int(hist_res['Is_Spliced'].sum())
         n_pure = n_total - n_spliced
 
-        c1.metric("槓桿破產率 (全部起點)", f"{hist_res['Is_Ruined'].mean() * 100:.1f}%")
+        c1.metric("槓桿破產率 (全部起點)", f"{hist_res['Ruin_Prob'].mean() * 100:.1f}%")
         pure = hist_res[~hist_res['Is_Spliced']]
         if n_pure > 0:
-            c1.metric(f"⤷ 僅『純歷史』起點破產率 (n={n_pure})", f"{pure['Is_Ruined'].mean() * 100:.1f}%")
+            c1.metric(f"⤷ 僅『純歷史』起點破產率 (n={n_pure})", f"{pure['Ruin_Prob'].mean() * 100:.1f}%")
         c1.caption(f"共 {n_total} 個起點：純歷史 {n_pure} 個、含未來情境拼接 {n_spliced} 個。"
                    f"{'⚠️ 拼接起點全部共用同一條 scenario 劇本，彼此高度相關，其破產率不代表獨立統計分佈，僅供單一劇本壓力參考。' if n_spliced > 0 else ''}")
+        n_backfilled = int(hist_res['Is_Backfilled'].sum())
+        if n_backfilled:
+            c1.caption(f"其中 {n_backfilled} 個起點用到了替身 {backfill['proxy'] if backfill else ''} 的歷史。")
+        if result.hist_replicates > 1:
+            c1.caption(f"🎲 已開啟隨機失業：每個起點各模擬 {result.hist_replicates} 種失業時點，上面的破產率是平均值。")
 
         c1.metric("槓桿擊敗 DCA 勝率 (全部起點)", f"{hist_res['Lev_Win'].mean() * 100:.1f}%")
-        h_med = hist_res.loc[~hist_res['Is_Ruined'], 'Lev_Final'].median()
+        h_med = hist_res['Lev_Final_Survivors'].median()
         c1.metric("槓桿期滿中位數 (存活者)", f"${int(h_med):,}" if not pd.isna(h_med) else "無")
         c1.metric("DCA 定期定額 期滿中位數", f"${int(hist_res['DCA_Final'].median()):,}")
 
-    c2.markdown(f"#### 【理論】錨定當前股價之 MC 宇宙 ({mc_paths}次)")
+    c2.markdown(f"#### 【理論】蒙地卡羅宇宙 ({mc_paths}次)")
     c2.caption(f"全歷史 Block Bootstrap (區塊={result.block_size}月) 純統計重抽樣；配息由 Dividend Beta 模型驅動。"
-               "**不套用 Scenario 劇本**（但黑天鵝/利率/動態折價情境仍生效）。")
+               "**不套用 Scenario 劇本**（但黑天鵝/利率/動態折價情境仍生效）。"
+               "它從整段歷史隨機重組未來，結果與哪個月進場無關。")
     if result.mc_ok and not mc_res.empty:
         c2.metric("槓桿破產率 (現金流斷裂)", f"{mc_res['Is_Ruined'].mean() * 100:.1f}%")
         c2.metric("槓桿擊敗 DCA 勝率", f"{mc_res['Lev_Win'].mean() * 100:.1f}%")
@@ -410,8 +469,9 @@ else:
 
     if not hist_res.empty:
         st.markdown("##### 實證拼接測試期滿淨值分佈 (槓桿策略)")
-        fig_hist = px.bar(hist_res, x='Start_Date', y='Lev_Final', color='Is_Ruined',
-                          pattern_shape='Is_Spliced',
+        chart = hist_res.assign(破產機率=(hist_res['Ruin_Prob'] * 100).round(1).astype(str) + '%')
+        fig_hist = px.bar(chart, x='Start_Date', y='Lev_Final', color='Is_Ruined',
+                          pattern_shape='Is_Spliced', hover_data=['破產機率'],
                           color_discrete_map={True: '#E74C3C', False: '#1ABC9C'},
                           labels={'Start_Date': '進場月份', 'Lev_Final': '期滿資產淨值 (元)',
                                   'Is_Ruined': '破產(斷頭)', 'Is_Spliced': '含未來情境拼接'})
@@ -421,8 +481,18 @@ else:
     st.markdown("---")
     st.header("🔍 微觀路徑追蹤與 Accounting Trace")
     st.info("💡 提醒：此微觀追蹤僅代表您選擇進場月份的「單一平行宇宙」展開，請參考上方 MC 引擎的整體破產率來評估真實系統性風險。")
+    sel_month = ui.choice(
+        "m", "要逐月追蹤哪一個進場月份", avail_dates,
+        '2022-01' if '2022-01' in avail_dates else avail_dates[0], by_value=True,
+        help="挑一個月份，看「如果那個月進場」之後每個月的資產、貸款餘額和還款來源。"
+             "進場當月以該月價格買進，下個月開始繳款；真實資料用完之後接上你選的未來情境。"
+             "這個選擇只影響下面的逐月明細，不會改變上方的統計結果。"
+    )
+    anchor_idx = avail_dates.index(sel_month)
+    if result.hist_replicates > 1:
+        st.caption("🎲 已開啟隨機失業：下面顯示的是這個進場月份其中一種失業時點的結果。")
 
-    trace = result.trace
+    trace = run_trace(data, params, anchor_idx)
     if not trace.empty:
         month_labels = [f"{d:%Y-%m}" + (" (預測)" if projected else "")
                         for d, projected in zip(trace['date'], trace['projected'])]

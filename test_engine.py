@@ -98,6 +98,12 @@ class WaterfallTests(unittest.TestCase):
         # 991,000 invested at 100, then 9,000 of it sold
         self.assertAlmostEqual(res.lev_final[0], 991_000 - 9_000)
 
+    def test_initial_purchase_pays_the_trading_fee(self):
+        res = one_path([0.0], [0.0], (E.SALARY,), fee=0.01, buffer_cash=100_000)
+        self.assertAlmostEqual(res.ledger['shares_a'][0, 0], 900_000 * 0.99 / 100)
+        # bought net of the fee, valued net of the fee to sell, plus the untouched buffer
+        self.assertAlmostEqual(res.lev_final[0], 900_000 * 0.99 * 0.99 + 100_000)
+
     def test_dividend_pool_pays_before_salary_when_ranked_first(self):
         res = one_path([0.0] * 2, [10_000] * 2, (E.DIVIDEND, E.SALARY), salary_cap=10_000, div_yield=0.004)
         np.testing.assert_allclose(res.ledger['from_dividend'][:, 0], [4_000, 4_000])
@@ -208,9 +214,44 @@ class RunTests(unittest.TestCase):
     def test_ledger_marks_months_beyond_real_history_as_projected(self):
         df = market(n=40)
         trace = E.run(df, params(), anchor_idx=30).trace
-        self.assertEqual(int((~trace['projected']).sum()), 10)
-        self.assertEqual(trace['date'].iloc[0], df.index[30])
-        self.assertEqual(trace['date'].iloc[10], df.index[-1] + pd.DateOffset(months=1))
+        self.assertEqual(int((~trace['projected']).sum()), 9)
+        self.assertEqual(trace['date'].iloc[0], df.index[31])
+        self.assertEqual(trace['date'].iloc[9], df.index[-1] + pd.DateOffset(months=1))
+
+    def test_entry_buys_at_that_months_price_and_earns_the_following_months(self):
+        # Month 5 itself gained 50%; someone entering at the end of it must not be credited with that.
+        df = market(flat=True, with_b=False)
+        ret = np.zeros(len(df))
+        ret[5], ret[6], ret[7] = 0.50, 0.10, -0.20
+        df['Price_Return_A'] = ret
+        df['Close_A'] = 20 * np.cumprod(1 + ret)
+        p = params(reinvest=False, salary_cap=1e9, source_order=(E.SALARY,), fee=0.0)
+        trace = E.run(df, p, anchor_idx=5).trace
+        np.testing.assert_allclose(trace['lev_value'].iloc[:3], [5_500_000, 4_400_000, 4_400_000])
+        self.assertEqual(trace['date'].iloc[0], df.index[6])
+        np.testing.assert_allclose(E.run(df, p, anchor_idx=4).trace['lev_value'].iloc[:2], [7_500_000, 8_250_000])
+
+    def test_latest_month_can_be_an_entry_and_is_all_scenario(self):
+        df = market(n=100)
+        res = E.run(df, params(), anchor_idx=99)
+        self.assertEqual(len(res.hist), 100)
+        self.assertEqual(int((~res.hist['Is_Spliced']).sum()), 100 - 84)   # entries with 84 real months ahead
+        self.assertTrue(res.trace['projected'].all())
+        self.assertEqual(res.trace['date'].iloc[0], df.index[-1] + pd.DateOffset(months=1))
+
+    def test_summary_does_not_depend_on_the_entry_month_being_traced(self):
+        df = market()
+        a, b = E.run(df, params(), 5), E.run(df, params(), 60)
+        pd.testing.assert_frame_equal(a.mc, b.mc)
+        pd.testing.assert_frame_equal(a.hist, b.hist)
+        self.assertFalse(a.trace['lev_value'].equals(b.trace['lev_value']))
+        self.assertIsNone(E.run_summary(df, params()).trace)
+
+    def test_monte_carlo_ignores_the_price_level(self):
+        df = market()
+        scaled = df.assign(Close_A=df['Close_A'] * 37, Close_B=df['Close_B'] / 11)
+        pd.testing.assert_frame_equal(E.run_summary(df, params()).mc, E.run_summary(scaled, params()).mc,
+                                      check_exact=False, rtol=1e-9)
 
     def test_fixed_seed_is_reproducible_and_seeds_differ(self):
         df = market()
@@ -276,6 +317,105 @@ class RunTests(unittest.TestCase):
             E.run(market(), params(), 500)
 
 
+class SecondAssetModelTests(unittest.TestCase):
+    """Months in which the second asset has no real data: before it existed and in the scenario."""
+
+    def paired(self, n=120, alpha=0.02, missing=0, noise=0.0):
+        df = market(n=n)
+        rng = np.random.RandomState(9)
+        ret_b = 2 * df['Price_Return_A'] + alpha + rng.normal(0, noise, n)
+        df['Price_Return_B'] = ret_b
+        df['Close_B'] = 30 * np.cumprod(1 + ret_b)
+        if missing:
+            df.iloc[:missing, [df.columns.get_loc('Price_Return_B'), df.columns.get_loc('Close_B')]] = np.nan
+        return df
+
+    def test_linear_form_is_beta_times_the_main_asset(self):
+        r = np.array([-0.2, 0.0, 0.1])
+        np.testing.assert_allclose(E.modelled_second_asset_return(r, 0.0, 2.0, 0.0, False), [-0.4, 0.0, 0.2])
+
+    def test_compounding_form_follows_the_leveraged_fund_formula(self):
+        r = np.array([-0.2, 0.0, 0.1])
+        out = E.modelled_second_asset_return(r, 0.0, 2.0, 0.003, True)
+        np.testing.assert_allclose(out, (1 + r) ** 2 * np.exp(-0.003) - 1)
+        self.assertLess(out[1], 0)                    # a flat month costs the decay
+        self.assertGreater(out[0], -0.4)              # a 20% fall costs less than twice 20%
+
+    def test_modelled_return_never_goes_below_total_loss(self):
+        out = E.modelled_second_asset_return(np.array([-0.9, -1.0]), np.array([-0.5, 0.0]), 2.0, 0.0, False)
+        np.testing.assert_array_equal(out, [-1.0, -1.0])
+
+    def test_decay_is_half_beta_beta_minus_one_times_variance(self):
+        df = self.paired()
+        res = E.run_summary(df, params())
+        self.assertAlmostEqual(res.beta_b, 2.0, places=6)
+        self.assertAlmostEqual(res.vol_drag, 0.5 * 2.0 * 1.0 * df['Price_Return_A'].var(), places=10)
+        self.assertEqual(E.run_summary(df, params(vol_drag=False)).vol_drag, 0)
+
+    def test_no_decay_for_an_unleveraged_second_asset(self):
+        df = market()
+        df['Price_Return_B'] = 0.8 * df['Price_Return_A']
+        df['Close_B'] = 30 * np.cumprod(1 + df['Price_Return_B'])
+        self.assertEqual(E.run_summary(df, params()).vol_drag, 0)
+
+    def test_sample_outperformance_is_not_projected_into_the_scenario(self):
+        # The second asset beat twice the first by 2% a month in the record. In a flat scenario
+        # it must stay flat rather than keep that edge.
+        df = self.paired(alpha=0.02)
+        p = params(vol_drag=False, future_annual_returns=(0.0,))
+        m = E._prepare_market(df, p)
+        ret_a, ret_b, _, win_lens, _ = E._history_paths(m, p)
+        last = len(df) - 1                              # entering in the latest month: all scenario
+        self.assertEqual(win_lens[last], 0)
+        np.testing.assert_allclose(ret_a[:, last], 0, atol=1e-12)
+        np.testing.assert_allclose(ret_b[:, last], 0, atol=1e-9)
+
+    def test_scenario_months_with_decay_lose_exactly_the_decay(self):
+        df = self.paired()
+        p = params(future_annual_returns=(0.0,))
+        m = E._prepare_market(df, p)
+        _, ret_b, _, _, _ = E._history_paths(m, p)
+        np.testing.assert_allclose(ret_b[:, -1], np.exp(-m.decay) - 1, atol=1e-9)
+
+    def test_months_before_the_second_asset_existed_are_modelled_from_the_first(self):
+        df = self.paired(missing=40)
+        p = params(vol_drag=False)
+        m = E._prepare_market(df, p)
+        self.assertEqual(m.modelled_b_months, 40)
+        np.testing.assert_allclose(m.ret_b[:40], 2 * m.ret_a[:40], atol=1e-9)
+        np.testing.assert_allclose(m.ret_b[40:], df['Price_Return_B'].iloc[40:])
+        res = E.run(df, p, 3)
+        self.assertEqual(res.modelled_b_months, 40)
+        self.assertEqual(len(res.hist), len(df))
+        self.assertFalse(res.hist.drop(columns='Lev_Final_Survivors').isna().any().any())
+        self.assertFalse(res.mc.isna().any().any())
+        self.assertFalse(res.trace.isna().any().any())
+
+    def test_modelled_months_scatter_like_the_real_relationship(self):
+        df = self.paired(missing=60, noise=0.03)
+        m = E._prepare_market(df, params(vol_drag=False))
+        self.assertAlmostEqual(m.resid_std_b, 0.03, delta=0.008)
+        self.assertAlmostEqual(np.std(m.ret_b[:60] - m.beta_b * m.ret_a[:60]), 0.03, delta=0.01)
+
+    def test_too_little_overlap_falls_back_to_tracking_one_for_one(self):
+        df = self.paired(missing=115)
+        m = E._prepare_market(df, params())
+        self.assertEqual((m.beta_b, m.resid_std_b, m.decay), (1.0, 0.0, 0.0))
+
+    def test_second_asset_with_no_data_at_all_is_ignored(self):
+        df = self.paired(missing=120)
+        res = E.run(df, params(), 5)
+        self.assertEqual(res.trace['shares_b'].abs().sum(), 0)
+        self.assertEqual(res.modelled_b_months, 0)
+
+    def test_entry_months_relying_on_proxy_data_are_marked(self):
+        df = market(n=100)
+        df['Synthetic_A'] = np.arange(100) < 30          # the first 30 months come from a proxy
+        hist = E.run_summary(df, params(total_months=12)).hist
+        # entries 0..29 start on a proxied price; later ones use only real months
+        self.assertEqual(hist['Is_Backfilled'].tolist(), [True] * 30 + [False] * 70)
+
+
 class JobLossTests(unittest.TestCase):
     def test_manual_window_lowers_the_cap_only_inside_it(self):
         job = E.JobLossParams(mode=E.JOB_LOSS_MANUAL, unemployed_salary=1_000, start_month=3, duration_months=2)
@@ -306,6 +446,39 @@ class JobLossTests(unittest.TestCase):
             rets, 1.0, E.JobLossParams(crash_linked=True, crash_threshold=0.15, crash_extra_low=0.3,
                                        crash_extra_high=0.4, **base), np.random.RandomState(1))
         self.assertGreater((linked[5] < 1).mean(), (calm[5] < 1).mean() * 3)
+
+    def test_history_averages_many_unemployment_draws_per_entry_month(self):
+        # Salary is the only source, so an entry month fails exactly when a job loss lands on it.
+        df = market(n=50, with_b=False)
+        job = E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=0.10, mean_duration=3.0)
+        p = params(reinvest=False, salary_cap=1e9, source_order=(E.SALARY,), job_loss=job, total_months=24)
+        res = E.run_summary(df, p)
+        self.assertEqual(res.hist_replicates, 100)
+        prob = res.hist['Ruin_Prob']
+        expected = 1 - 0.9 ** 2                           # at least one spell in two years
+        self.assertTrue(((prob > 0) & (prob < 1)).all())
+        self.assertAlmostEqual(prob.mean(), expected, delta=0.03)
+        self.assertLess(prob.std(), 0.08)                 # no entry month hinges on a single draw
+        pd.testing.assert_frame_equal(res.hist, E.run_summary(df, p).hist)
+
+    def test_replicates_are_capped_by_total_paths(self):
+        job = E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=0.10)
+        self.assertEqual(E.run_summary(market(n=250), params(job_loss=job)).hist_replicates, 40)
+
+    def test_without_random_job_loss_each_entry_month_is_simulated_once(self):
+        res = E.run_summary(market(), params(salary_cap=20_000.0, swan_month=6, swan_drop=0.3))
+        self.assertEqual(res.hist_replicates, 1)
+        self.assertTrue(res.hist['Ruin_Prob'].isin([0.0, 1.0]).all())
+        self.assertTrue(res.hist['Lev_Win'].isin([0.0, 1.0]).all())
+        survived = ~res.hist['Is_Ruined']
+        np.testing.assert_allclose(res.hist.loc[survived, 'Lev_Final_Survivors'], res.hist.loc[survived, 'Lev_Final'])
+        self.assertTrue(res.hist.loc[~survived, 'Lev_Final_Survivors'].isna().all())
+
+    def test_ledger_follows_one_of_the_unemployment_draws(self):
+        job = E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=0.3, mean_duration=4.0, unemployed_salary=1_000.0)
+        trace = E.run(market(), params(job_loss=job, salary_cap=30_000.0, source_order=(E.SALARY, E.SELL)), 10).trace
+        self.assertTrue(trace['from_salary'].isin([1_000.0, 30_000.0]).all())
+        self.assertTrue((trace['from_salary'] == 1_000.0).any())
 
     def test_spells_last_at_least_one_month_for_both_distributions(self):
         for dist in ("lognormal", "poisson"):

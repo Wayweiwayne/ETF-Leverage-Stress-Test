@@ -14,9 +14,12 @@ SOURCES = ["本薪(自掏腰包)", "配息資金池", "緩衝金", "變賣資產
 
 
 def fake_history(ticker):
-    """Deterministic daily prices; the 'L' ticker behaves like a 2x fund and pays nothing."""
+    """Deterministic daily prices; the 'L' ticker behaves like a 2x fund and pays nothing.
+
+    OLD* reaches back to 2006, SEAM* carries an unadjusted 4-for-1 split, STALE* arrives from a snapshot.
+    """
     rng = np.random.RandomState(sum(map(ord, ticker)))
-    days = pd.bdate_range('2016-01-04', '2024-12-31')
+    days = pd.bdate_range('2006-01-02' if ticker.startswith('OLD') else '2016-01-04', '2024-12-31')
     leverage = 2.0 if 'L' in ticker else 1.0
     close = 20 * np.cumprod(1 + rng.normal(0.0004 * leverage, 0.011 * leverage, len(days)))
     dividends = np.zeros(len(days))
@@ -25,7 +28,13 @@ def fake_history(ticker):
         first_day = ~pd.Series(days.to_period('M'), index=days).duplicated()
         payout = (first_day & months.isin([2, 5, 8, 11])).to_numpy()
         dividends[payout] = close[payout] * 0.015
-    return pd.DataFrame({'Close': close, 'Dividends': dividends}, index=days.tz_localize('Asia/Taipei'))
+    if ticker.startswith('SEAM'):
+        close[days < '2019-06-03'] *= 4
+    df = pd.DataFrame({'Close': close, 'Dividends': dividends}, index=days.tz_localize('Asia/Taipei'))
+    df.attrs.update(ticker=ticker, data_source='live', fetched_at='2024-12-31T10:00:00Z')
+    if ticker.startswith('STALE'):
+        df.attrs.update(data_source='snapshot', fetched_at='2024-11-05T10:00:00Z')
+    return df
 
 
 class AppTests(unittest.TestCase):
@@ -173,6 +182,65 @@ class AppTests(unittest.TestCase):
         self.ok(at.text_input(key="a").set_value("../etc").run())
         self.assertTrue(any("格式不正確" in e.value for e in at.error))
         self.load_history.assert_not_called()
+
+    def texts(self, elements):
+        return " ".join(e.value for e in elements)
+
+    def test_history_is_extended_with_the_proxy(self):
+        at = self.start()
+        self.assertEqual(at.selectbox(key="m").options[0], "2016-02")
+        self.assertIn("替身 0056.TW 的歷史沒有比 00878.TW 更早", self.texts(at.caption))
+        self.assertIn("可用的歷史只有 107 個月", self.texts(at.warning))
+
+        at = self.start(proxy="OLD.TW")
+        self.assertEqual(at.selectbox(key="m").options[0], "2006-02")
+        self.assertIn("以 OLD.TW 當時的實際漲跌與配息代替", self.texts(at.caption))
+        self.assertIn("120 個起點用到了替身 OLD.TW 的歷史", self.texts(at.caption))
+        self.assertIn("00631L.TW 在 2016-02 之前沒有資料，這 120 個月用", self.texts(at.caption))
+        self.assertNotIn("可用的歷史只有", self.texts(at.warning))
+        self.assertEqual(len(at.error), 0)
+
+    def test_blank_proxy_uses_only_the_assets_own_history(self):
+        at = self.start(proxy="")
+        self.assertEqual(at.selectbox(key="m").options[0], "2016-02")
+        self.assertNotIn("替身", self.texts(at.caption))
+
+    def test_unusable_proxy_is_reported_and_ignored(self):
+        at = self.start()
+        self.ok(at.text_input(key="proxy").set_value("no good").run())
+        self.assertIn("替身 NO GOOD 的資料無法使用", self.texts(at.warning))
+        self.assertIn("槓桿破產率 (現金流斷裂)", [m.label for m in at.metric])
+
+    def test_unadjusted_split_is_repaired_and_announced(self):
+        at = self.start(a="SEAM.TW", seed="1")
+        self.assertIn("1 股拆成 4 股", self.texts(at.info))
+        self.assertNotIn("不尋常", self.texts(at.warning))
+        repaired = self.metric(at, "槓桿期滿中位數 (存活者)")
+
+        at = self.start(a="SEAM.TW", seed="1", fix="0")
+        self.assertNotIn("1 股拆成 4 股", self.texts(at.info))
+        self.assertIn("2019-06-03 單日 -7", self.texts(at.warning))
+        self.assertNotEqual(self.metric(at, "槓桿期滿中位數 (存活者)"), repaired)
+
+    def test_snapshot_data_is_flagged_with_its_date(self):
+        at = self.start(a="STALE.TW")
+        self.assertIn("STALE.TW：即時行情暫時無法取得，目前使用 2024-11-05 存檔的資料", self.texts(at.warning))
+        self.assertNotIn("存檔的資料", self.texts(self.start().warning))
+
+    def test_entry_month_changes_the_ledger_but_not_the_statistics(self):
+        at = self.start(seed="1")
+        metrics = [(m.label, m.value) for m in at.metric]
+        ledger = at.dataframe[0].value
+        self.assertEqual(ledger['真實/預測月份'].iloc[0], "2022-02")     # entered 2022-01, first payment a month later
+        self.ok(at.selectbox(key="m").set_value("2019-05").run())
+        self.assertEqual([(m.label, m.value) for m in at.metric], metrics)
+        self.assertEqual(at.dataframe[0].value['真實/預測月份'].iloc[0], "2019-06")
+        self.assertFalse(at.dataframe[0].value['總資產淨值(槓桿)'].equals(ledger['總資產淨值(槓桿)']))
+
+    def test_random_job_loss_reports_averaged_history(self):
+        at = self.start(jl="1", jl_mode="1", jl_prob="20")
+        self.assertIn("每個起點各模擬 93 種失業時點", self.texts(at.caption))
+        self.assertEqual(len(at.error), 0)
 
     def test_data_failure_is_shown_as_a_message(self):
         self.load_history.side_effect = ValueError("暫時無法取得資料")

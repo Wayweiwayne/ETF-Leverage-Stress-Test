@@ -26,7 +26,13 @@ DCA_FULL_PAYMENT = "full"          # the whole scheduled loan payment, regardles
 JOB_LOSS_NONE, JOB_LOSS_MANUAL, JOB_LOSS_RANDOM = "none", "manual", "random"
 
 _SPLICE_SEED = 20240601
+_BACKFILL_SEED = 20240602
 _HIST_JOB_LOSS_SEED = 13572468
+# With random job loss every start month is simulated under several unemployment draws.
+_HIST_MAX_PATHS = 10_000
+_HIST_MAX_REPLICATES = 100
+# Fewer overlapping months than this is too little to estimate how the second asset follows the first.
+_MIN_OVERLAP_FOR_BETA = 12
 
 
 @dataclass(frozen=True)
@@ -98,17 +104,35 @@ class PathResults:
 
 @dataclass
 class EngineResults:
-    hist: pd.DataFrame
-    mc: pd.DataFrame
-    trace: pd.DataFrame
+    hist: pd.DataFrame          # one row per entry month
+    mc: pd.DataFrame            # one row per Monte Carlo path
     schedule: LoanSchedule
     buffer_cash: float
     block_size: int
     mc_ok: bool
-    vol_drag: float
+    vol_drag: float             # monthly volatility decay applied to modelled second-asset returns
     beta_b: float
     job_loss_any_rate: float
     job_loss_avg_months: float
+    hist_replicates: int        # unemployment draws per entry month (1 unless job loss is random)
+    modelled_b_months: int      # historical months in which the second asset had to be modelled
+    trace: pd.DataFrame | None = None  # month-by-month ledger of one entry month
+
+
+@dataclass
+class _Market:
+    n: int
+    ret_a: np.ndarray
+    div_a: np.ndarray
+    close_a: np.ndarray
+    synthetic_a: np.ndarray
+    has_b: bool
+    ret_b: np.ndarray
+    close_b: np.ndarray
+    modelled_b_months: int
+    beta_b: float
+    resid_std_b: float
+    decay: float
 
 
 def parse_annual_returns(text):
@@ -221,7 +245,7 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
 
     prices_a = np.array(price_a0, dtype=float)
     prices_b = np.array(price_b0, dtype=float)
-    shares_a = (principal - buffer_cash) / prices_a
+    shares_a = (principal - buffer_cash) * (1 - fee) / prices_a
     shares_b = np.zeros(n_paths)
     div_pools = np.zeros(n_paths)
     buf_vals = np.full(n_paths, float(buffer_cash))
@@ -398,18 +422,239 @@ def _inject_swan(ret_a, ret_b, month, drop, beta_b, has_b):
             ret_b[m, :] = np.maximum(ret_b[m, :] - drop * beta_b, -1.0)
 
 
-def _build_trace(df, anchor_idx, schedule, ledger):
-    months = len(schedule.payments)
+def modelled_second_asset_return(ret_a, noise, beta, decay, compounding):
+    """Second-asset return for a month in which it has no real data.
+
+    It follows the main asset with sensitivity `beta` and carries no excess return of its own:
+    whatever it out- or under-performed by in the sample is not projected. With `compounding`
+    the month is treated the way a daily-rebalanced leveraged fund behaves, (1 + r)^beta less
+    the volatility decay beta*(beta-1)/2 * variance; without it the return is simply beta * r.
+    """
+    if compounding:
+        base = np.maximum(1 + ret_a, 1e-9) ** beta * np.exp(-decay) - 1
+    else:
+        base = beta * ret_a
+    return np.clip(base + noise, -1.0, 10.0)
+
+
+def _prepare_market(df, p):
+    n = len(df)
+    if n < 1:
+        raise ValueError("沒有可回測的月份。")
+    ret_a = df["Price_Return_A"].to_numpy(dtype=float)
+    div_a = df["Div_Yield_A"].to_numpy(dtype=float)
+    close_a = df["Close_A"].to_numpy(dtype=float)
+    synthetic_a = (df["Synthetic_A"].to_numpy(dtype=bool) if "Synthetic_A" in df.columns
+                   else np.zeros(n, dtype=bool))
+
+    has_b = bool(p.reinvest and "Close_B" in df.columns and df["Price_Return_B"].notna().any())
+    ret_b, close_b = np.zeros(n), np.ones(n)
+    beta_b, resid_std_b, decay, modelled = 1.0, 0.0, 0.0, 0
+    if has_b:
+        ret_b = df["Price_Return_B"].to_numpy(dtype=float).copy()
+        close_b = df["Close_B"].to_numpy(dtype=float).copy()
+        real = ~np.isnan(ret_b)
+        if real.sum() >= _MIN_OVERLAP_FOR_BETA:
+            cov = np.cov(ret_a[real], ret_b[real])
+            if cov[0, 0] > 0:
+                beta_b = float(cov[0, 1] / cov[0, 0])
+                alpha = ret_b[real].mean() - beta_b * ret_a[real].mean()
+                resid_std_b = float(np.std(ret_b[real] - (alpha + beta_b * ret_a[real]), ddof=1))
+        sigma_a = float(np.std(ret_a, ddof=1)) if n > 1 else 0.0
+        if p.vol_drag:
+            decay = max(0.0, 0.5 * beta_b * (beta_b - 1)) * sigma_a ** 2
+        missing = ~real
+        modelled = int(missing.sum())
+        if modelled:
+            rng = np.random.RandomState(_BACKFILL_SEED)
+            noise = rng.normal(0, resid_std_b, size=modelled) if resid_std_b > 0 else 0.0
+            ret_b[missing] = modelled_second_asset_return(ret_a[missing], noise, beta_b, decay, p.vol_drag)
+            close_b[missing] = close_b[real][0]  # only relative moves matter; any positive level will do
+    return _Market(n, ret_a, div_a, close_a, synthetic_a, has_b, ret_b, close_b, modelled,
+                   beta_b, resid_std_b, decay)
+
+
+def _history_paths(m, p):
+    """Return, yield and cap inputs for every entry month.
+
+    Entering in month i means buying at that month's price; the first payment falls due one
+    month later, so the path uses the returns of months i+1 onwards. Whatever the real record
+    cannot cover is filled with the scenario.
+    """
+    months, n = p.total_months, m.n
+    m_disc = p.structural_discount_pct / 100.0 / 12.0
+    future = _future_monthly_returns(p.future_annual_returns, months)
+    splice_rng = np.random.RandomState(_SPLICE_SEED)
+
+    ret_a = np.zeros((months, n))
+    ret_b = np.zeros((months, n))
+    div_a = np.zeros((months, n))
+    win_lens = np.minimum(months, n - 1 - np.arange(n))
+
+    for i in range(n):
+        win = int(win_lens[i])
+        fut = months - win
+        rows = slice(i + 1, i + 1 + win)
+        ret_a[:win, i] = m.ret_a[rows] - m_disc
+        div_a[:win, i] = m.div_a[rows]
+        if m.has_b:
+            ret_b[:win, i] = m.ret_b[rows] - m_disc
+        if fut > 0:
+            mr = future[:fut] - m_disc
+            ret_a[win:, i] = mr
+            if m.has_b:
+                noise = splice_rng.normal(0, m.resid_std_b, size=fut) if m.resid_std_b > 0 else 0.0
+                ret_b[win:, i] = modelled_second_asset_return(mr, noise, m.beta_b, m.decay, p.vol_drag)
+            p_end = m.close_a[i + win]
+            path = np.cumprod(np.concatenate(([p_end], 1 + mr)))
+            p_prev, p_next = path[:-1], path[1:]
+            base_div = p_end * p.base_div_yield / 12.0
+            div_amt = np.maximum(base_div * 0.1, base_div * (1 + ((p_next / p_end) - 1) * p.div_beta))
+            with np.errstate(divide='ignore', invalid='ignore'):
+                div_a[win:, i] = np.where(p_prev > 0, div_amt / p_prev, 0.0)
+
+    _inject_swan(ret_a, ret_b, p.swan_month, p.swan_drop, m.beta_b, m.has_b)
+
+    # An entry month counts as backfilled when it, or any real month it relies on, uses proxy data.
+    synthetic_before = np.concatenate(([0], np.cumsum(m.synthetic_a)))
+    backfilled = (synthetic_before[np.arange(n) + win_lens + 1] - synthetic_before[np.arange(n)]) > 0
+    return ret_a, ret_b, div_a, win_lens, backfilled
+
+
+def _history_caps(ret_a_hist, p):
+    """Salary caps for every entry month, repeated over several unemployment draws when random."""
+    months, n = ret_a_hist.shape
+    if p.job_loss.mode != JOB_LOSS_RANDOM:
+        base = salary_cap_schedule(p.salary_cap, p.job_loss, months)
+        return np.repeat(base.reshape(-1, 1), n, axis=1), 1
+    replicates = int(np.clip(_HIST_MAX_PATHS // n, 1, _HIST_MAX_REPLICATES))
+    caps = simulate_unemployment(np.tile(ret_a_hist, (1, replicates)), p.salary_cap, p.job_loss,
+                                 np.random.RandomState(_HIST_JOB_LOSS_SEED))
+    return caps, replicates
+
+
+def _common_args(p, schedule, buffer_cash, ratio_b):
+    return dict(payments=schedule.payments, principal=p.principal, buffer_cash=buffer_cash, fee=p.fee,
+                reinvest=p.reinvest, ratio_b=ratio_b, order=p.source_order,
+                haircut_trigger=p.haircut_trigger, haircut_penalty=p.haircut_penalty, dca_mode=p.dca_mode)
+
+
+def _setup(df, p):
+    market = _prepare_market(df, p)
+    schedule = build_loan_schedule(p.principal, p.annual_rate_pct, p.total_months, p.grace_months,
+                                   p.rate_shock_year, p.rate_shock_delta_pct)
+    buffer_cash = buffer_cash_for(schedule, p.grace_months, p.buffer_months, p.principal)
+    ratio_b = p.reinvest_ratio_b if market.has_b else 0.0
+    return market, schedule, _common_args(p, schedule, buffer_cash, ratio_b), buffer_cash
+
+
+def run_summary(df, params):
+    """Run both engines on aligned monthly data (see market_data.align_months).
+
+    Rolling history: one row per entry month. Monte Carlo: one row per path; it resamples the
+    whole record and does not depend on any particular entry month.
+    """
+    p = params
+    m, schedule, common, buffer_cash = _setup(df, p)
+    months, n = p.total_months, m.n
+    m_disc = p.structural_discount_pct / 100.0 / 12.0
+
+    # --- Rolling history ---
+    ret_a_hist, ret_b_hist, div_a_hist, win_lens, backfilled = _history_paths(m, p)
+    caps_hist, reps = _history_caps(ret_a_hist, p)
+    tile = (lambda x: np.tile(x, (1, reps))) if reps > 1 else (lambda x: x)
+    hist = simulate_paths(tile(ret_a_hist), tile(ret_b_hist), tile(div_a_hist),
+                          np.tile(m.close_a, reps), np.tile(m.close_b, reps), salary_cap=caps_hist, **common)
+    ruined = hist.ruined.reshape(reps, n)
+    lev = hist.lev_final.reshape(reps, n)
+    dca = hist.dca_final.reshape(reps, n)
+    alive = (~ruined).any(axis=0)
+    survivors = np.full(n, np.nan)
+    survivors[alive] = np.nanmedian(np.where(ruined, np.nan, lev)[:, alive], axis=0)
+    ruin_prob = ruined.mean(axis=0)
+    df_hist = pd.DataFrame({
+        "Start_Date": df.index,
+        "Ruin_Prob": ruin_prob,
+        "Is_Ruined": ruin_prob > 0.5,
+        "Is_Spliced": win_lens < months,
+        "Is_Backfilled": backfilled,
+        "Lev_Final": np.median(lev, axis=0),
+        "Lev_Final_Survivors": survivors,
+        "DCA_Final": np.median(dca, axis=0),
+        "Lev_Win": ((~ruined) & (lev > dca)).mean(axis=0),
+    })
+
+    # --- Monte Carlo: block bootstrap of the monthly record ---
+    block = int(max(1, min(p.block_size, n)))
+    mc_ok = n >= 2
+    any_rate, avg_months = 0.0, 0.0
+    if mc_ok:
+        rng = np.random.RandomState(p.seed)
+        n_paths = int(p.mc_paths)
+        blocks_needed = (months // block) + 1
+        starts = rng.randint(0, n - block + 1, size=(blocks_needed, n_paths))
+        idx = (starts[:, None, :] + np.arange(block)[None, :, None]).reshape(-1, n_paths)[:months, :]
+
+        ret_a_mc = m.ret_a[idx] - m_disc
+        ret_b_mc = m.ret_b[idx] - m_disc if m.has_b else np.zeros((months, n_paths))
+        _inject_swan(ret_a_mc, ret_b_mc, p.swan_month, p.swan_drop, m.beta_b, m.has_b)
+        div_a_mc = dividend_model_yields(np.cumprod(1 + ret_a_mc, axis=0), 1.0, p.base_div_yield, p.div_beta)
+
+        if p.job_loss.mode == JOB_LOSS_RANDOM:
+            job_rng = np.random.RandomState(None if p.seed is None else p.seed + 1)
+            caps_mc = simulate_unemployment(ret_a_mc, p.salary_cap, p.job_loss, job_rng)
+            unemployed = caps_mc < p.salary_cap
+            any_rate = float(unemployed.any(axis=0).mean())
+            avg_months = float(unemployed.sum(axis=0).mean())
+        else:
+            base = salary_cap_schedule(p.salary_cap, p.job_loss, months)
+            caps_mc = np.repeat(base.reshape(-1, 1), n_paths, axis=1)
+
+        # Only relative price moves matter, so every path starts from a price of 1.
+        mc = simulate_paths(ret_a_mc, ret_b_mc, div_a_mc, np.ones(n_paths), np.ones(n_paths),
+                            salary_cap=caps_mc, **common)
+        df_mc = pd.DataFrame({
+            "Is_Ruined": mc.ruined, "Lev_Final": mc.lev_final, "DCA_Final": mc.dca_final,
+            "Lev_Win": (~mc.ruined) & (mc.lev_final > mc.dca_final),
+        })
+    else:
+        df_mc = pd.DataFrame(columns=["Is_Ruined", "Lev_Final", "DCA_Final", "Lev_Win"])
+
+    return EngineResults(hist=df_hist, mc=df_mc, schedule=schedule, buffer_cash=buffer_cash,
+                         block_size=block, mc_ok=mc_ok, vol_drag=float(m.decay), beta_b=float(m.beta_b),
+                         job_loss_any_rate=any_rate, job_loss_avg_months=avg_months,
+                         hist_replicates=reps, modelled_b_months=m.modelled_b_months)
+
+
+def run_trace(df, params, anchor_idx):
+    """Month-by-month ledger for one entry month.
+
+    It reruns the very simulation behind that month's row in the rolling-history results, so the
+    two cannot drift apart. Row k is the k-th month after entry. With random job loss it shows the
+    first of that month's unemployment draws.
+    """
+    p = params
+    m, schedule, common, _ = _setup(df, p)
+    if not 0 <= anchor_idx < m.n:
+        raise ValueError("進場月份超出資料範圍。")
+    ret_a_hist, ret_b_hist, div_a_hist, _, _ = _history_paths(m, p)
+    caps_hist, _ = _history_caps(ret_a_hist, p)
+    col = slice(anchor_idx, anchor_idx + 1)
+    one = simulate_paths(ret_a_hist[:, col], ret_b_hist[:, col], div_a_hist[:, col], m.close_a[col],
+                         m.close_b[col], salary_cap=caps_hist[:, col], record=True, **common)
+    ledger = one.ledger
+
+    months = p.total_months
     defaulted = ledger["defaulted"][:, 0]
     last = int(np.argmax(defaulted)) + 1 if defaulted.any() else months
-    n_hist = len(df)
     dates, projected = [], []
-    for i in range(last):
-        if anchor_idx + i < n_hist:
-            dates.append(df.index[anchor_idx + i])
+    for k in range(1, last + 1):
+        row = anchor_idx + k
+        if row < m.n:
+            dates.append(df.index[row])
             projected.append(False)
         else:
-            dates.append(df.index[-1] + pd.DateOffset(months=anchor_idx + i - n_hist + 1))
+            dates.append(df.index[-1] + pd.DateOffset(months=row - m.n + 1))
             projected.append(True)
     return pd.DataFrame({
         "month": np.arange(1, last + 1),
@@ -432,141 +677,7 @@ def _build_trace(df, anchor_idx, schedule, ledger):
 
 
 def run(df, params, anchor_idx):
-    """Run both engines on aligned monthly data.
-
-    `df` comes from market_data.align_months: columns Close_A, Price_Return_A, Div_Yield_A and,
-    when a second asset is held, the same with suffix _B. Returns the rolling-history results
-    (one row per start month), the Monte Carlo results (one row per path, anchored on the price
-    at `anchor_idx`) and the month-by-month ledger of the start month `anchor_idx`.
-    """
-    p = params
-    months = p.total_months
-    n_hist = len(df)
-    if n_hist < 1:
-        raise ValueError("沒有可回測的月份。")
-    if not 0 <= anchor_idx < n_hist:
-        raise ValueError("進場月份超出資料範圍。")
-
-    has_b = p.reinvest and "Close_B" in df.columns
-    ratio_b = p.reinvest_ratio_b if has_b else 0.0
-    schedule = build_loan_schedule(p.principal, p.annual_rate_pct, months, p.grace_months,
-                                   p.rate_shock_year, p.rate_shock_delta_pct)
-    buffer_cash = buffer_cash_for(schedule, p.grace_months, p.buffer_months, p.principal)
-    base_caps = salary_cap_schedule(p.salary_cap, p.job_loss, months)
-    random_job_loss = p.job_loss.mode == JOB_LOSS_RANDOM
-    m_disc = p.structural_discount_pct / 100.0 / 12.0
-    future = _future_monthly_returns(p.future_annual_returns, months)
-
-    hist_ret_a = df["Price_Return_A"].to_numpy(dtype=float)
-    hist_div_a = df["Div_Yield_A"].to_numpy(dtype=float)
-    close_a = df["Close_A"].to_numpy(dtype=float)
-    hist_ret_b = df["Price_Return_B"].to_numpy(dtype=float) if has_b else None
-    close_b = df["Close_B"].to_numpy(dtype=float) if has_b else np.ones(n_hist)
-
-    # Second asset modelled on the first (r_B = alpha + beta * r_A + noise) wherever it must be synthesised.
-    beta_b, alpha_b, resid_std_b, sigma_a = 1.0, 0.0, 0.0, 0.0
-    if n_hist > 1:
-        sigma_a = float(np.std(hist_ret_a, ddof=1))
-        if has_b:
-            cov = np.cov(hist_ret_a, hist_ret_b)
-            if cov[0, 0] > 0:
-                beta_b = cov[0, 1] / cov[0, 0]
-                alpha_b = hist_ret_b.mean() - beta_b * hist_ret_a.mean()
-                resid_std_b = float(np.std(hist_ret_b - (alpha_b + beta_b * hist_ret_a), ddof=1))
-
-    # Real history already contains a leveraged ETF's volatility decay; only synthetic months need it.
-    vol_drag = 0.5 * (beta_b * sigma_a) ** 2 if (p.vol_drag and has_b) else 0.0
-
-    # --- Rolling history: every month is a start; shortfalls are filled with the scenario ---
-    splice_rng = np.random.RandomState(_SPLICE_SEED)
-    ret_a_hist = np.zeros((months, n_hist))
-    ret_b_hist = np.zeros((months, n_hist))
-    div_a_hist = np.zeros((months, n_hist))
-    win_lens = np.minimum(months, n_hist - np.arange(n_hist))
-
-    for i in range(n_hist):
-        win = int(win_lens[i])
-        fut = months - win
-        ret_a_hist[:win, i] = hist_ret_a[i:i + win] - m_disc
-        div_a_hist[:win, i] = hist_div_a[i:i + win]
-        if has_b:
-            ret_b_hist[:win, i] = hist_ret_b[i:i + win] - m_disc
-        if fut > 0:
-            mr = future[:fut] - m_disc
-            ret_a_hist[win:, i] = mr
-            if has_b:
-                noise = splice_rng.normal(0, resid_std_b, size=fut) if resid_std_b > 0 else 0.0
-                ret_b_hist[win:, i] = alpha_b + mr * beta_b + noise - vol_drag
-            p_end = close_a[i + win - 1]
-            path = np.cumprod(np.concatenate(([p_end], 1 + mr)))
-            p_prev, p_next = path[:-1], path[1:]
-            base_div = p_end * p.base_div_yield / 12.0
-            div_amt = np.maximum(base_div * 0.1, base_div * (1 + ((p_next / p_end) - 1) * p.div_beta))
-            with np.errstate(divide='ignore', invalid='ignore'):
-                div_a_hist[win:, i] = np.where(p_prev > 0, div_amt / p_prev, 0.0)
-
-    _inject_swan(ret_a_hist, ret_b_hist, p.swan_month, p.swan_drop, beta_b, has_b)
-
-    if random_job_loss:
-        caps_hist = simulate_unemployment(ret_a_hist, p.salary_cap, p.job_loss,
-                                          np.random.RandomState(_HIST_JOB_LOSS_SEED))
-    else:
-        caps_hist = np.repeat(base_caps.reshape(-1, 1), n_hist, axis=1)
-
-    common = dict(payments=schedule.payments, principal=p.principal, buffer_cash=buffer_cash, fee=p.fee,
-                  reinvest=p.reinvest, ratio_b=ratio_b, order=p.source_order,
-                  haircut_trigger=p.haircut_trigger, haircut_penalty=p.haircut_penalty, dca_mode=p.dca_mode)
-
-    hist = simulate_paths(ret_a_hist, ret_b_hist, div_a_hist, close_a, close_b, salary_cap=caps_hist, **common)
-    df_hist = pd.DataFrame({
-        "Start_Date": df.index, "Is_Ruined": hist.ruined, "Is_Spliced": win_lens < months,
-        "Lev_Final": hist.lev_final, "DCA_Final": hist.dca_final,
-        "Lev_Win": (~hist.ruined) & (hist.lev_final > hist.dca_final),
-    })
-
-    # The ledger is the same simulation restricted to one start month, so it cannot drift from the summary.
-    col = slice(anchor_idx, anchor_idx + 1)
-    one = simulate_paths(ret_a_hist[:, col], ret_b_hist[:, col], div_a_hist[:, col], close_a[col], close_b[col],
-                         salary_cap=caps_hist[:, col], record=True, **common)
-    trace = _build_trace(df, anchor_idx, schedule, one.ledger)
-
-    # --- Monte Carlo: block bootstrap of real monthly returns, anchored on the chosen month's price ---
-    block = int(max(1, min(p.block_size, n_hist)))
-    mc_ok = n_hist >= 2
-    any_rate, avg_months = 0.0, 0.0
-    if mc_ok:
-        rng = np.random.RandomState(p.seed)
-        n_paths = int(p.mc_paths)
-        blocks_needed = (months // block) + 1
-        starts = rng.randint(0, n_hist - block + 1, size=(blocks_needed, n_paths))
-        idx = (starts[:, None, :] + np.arange(block)[None, :, None]).reshape(-1, n_paths)[:months, :]
-
-        ret_a_mc = hist_ret_a[idx] - m_disc
-        ret_b_mc = hist_ret_b[idx] - m_disc if has_b else np.zeros((months, n_paths))
-        _inject_swan(ret_a_mc, ret_b_mc, p.swan_month, p.swan_drop, beta_b, has_b)
-
-        p_a0 = close_a[anchor_idx]
-        p_b0 = close_b[anchor_idx]
-        div_a_mc = dividend_model_yields(p_a0 * np.cumprod(1 + ret_a_mc, axis=0), p_a0, p.base_div_yield, p.div_beta)
-
-        if random_job_loss:
-            job_rng = np.random.RandomState(None if p.seed is None else p.seed + 1)
-            caps_mc = simulate_unemployment(ret_a_mc, p.salary_cap, p.job_loss, job_rng)
-            unemployed = caps_mc < p.salary_cap
-            any_rate = float(unemployed.any(axis=0).mean())
-            avg_months = float(unemployed.sum(axis=0).mean())
-        else:
-            caps_mc = np.repeat(base_caps.reshape(-1, 1), n_paths, axis=1)
-
-        mc = simulate_paths(ret_a_mc, ret_b_mc, div_a_mc, np.full(n_paths, p_a0), np.full(n_paths, p_b0),
-                            salary_cap=caps_mc, **common)
-        df_mc = pd.DataFrame({
-            "Is_Ruined": mc.ruined, "Lev_Final": mc.lev_final, "DCA_Final": mc.dca_final,
-            "Lev_Win": (~mc.ruined) & (mc.lev_final > mc.dca_final),
-        })
-    else:
-        df_mc = pd.DataFrame(columns=["Is_Ruined", "Lev_Final", "DCA_Final", "Lev_Win"])
-
-    return EngineResults(hist=df_hist, mc=df_mc, trace=trace, schedule=schedule, buffer_cash=buffer_cash,
-                         block_size=block, mc_ok=mc_ok, vol_drag=float(vol_drag), beta_b=float(beta_b),
-                         job_loss_any_rate=any_rate, job_loss_avg_months=avg_months)
+    """Both engines plus the ledger of entry month `anchor_idx`, in one call."""
+    result = run_summary(df, params)
+    result.trace = run_trace(df, params, anchor_idx)
+    return result

@@ -19,5 +19,7 @@ Thumbs.db
 
 # 本機輸出
 *.csv
+# 隨程式部署的行情存檔是刻意提交的
+!data/snapshots/*.csv
 
 .yf_cache/
