@@ -8,7 +8,7 @@ import streamlit as st
 import engine
 import ui_state as ui
 from market_data import load_history, monthly_data, align_months, backfill_with_proxy, normalize_ticker
-from version import APP_VERSION
+from version import APP_VERSION, SOURCE_URL
 
 LOAN_TYPES = ["理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"]
 # 各貸款類型的預設值：(年利率 %, 年限, 是否預設啟用寬限期)
@@ -598,6 +598,8 @@ else:
 st.markdown("---")
 st.caption("⚠️ 本工具是財務工程的模擬，結果完全取決於歷史資料與你輸入的假設，僅供教育與研究用途，不構成任何投資建議。"
            "借錢投資可能損失全部本金並仍須償還貸款，請自行審慎評估，必要時諮詢專業人士。")
+st.caption(f"{APP_VERSION}｜本程式為自由軟體，以 AGPL-3.0 授權，不提供任何擔保。"
+           f"原始碼：[{SOURCE_URL.removeprefix('https://')}]({SOURCE_URL})")
 
 # ==========================================
 # 4. 分享連結

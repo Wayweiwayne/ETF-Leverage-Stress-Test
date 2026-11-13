@@ -109,6 +109,16 @@ python -m unittest -v
 
 測試不需要網路：引擎以合成資料驗證，畫面測試則以假行情跑完整個 App。每次 push 都會由 GitHub Actions 在 Python 3.11、3.12、3.13 上自動執行（`.github/workflows/tests.yml`）。
 
+## 授權
+
+Copyright (C) 2026 Wayweiwayne
+
+本專案的程式碼以 [GNU Affero General Public License v3.0](LICENSE)（AGPL-3.0）授權。你可以自由使用、修改與散布；
+但只要散布修改後的版本，或把它架成網站、服務提供給別人使用，就必須以同樣的授權公開你的完整原始碼。
+本程式不提供任何擔保，詳見授權條文。
+
+授權只涵蓋程式碼。`data/snapshots/` 裡的行情資料來自 Yahoo Finance，權利屬於原資料來源，不在這份授權的範圍內。
+
 ## 免責聲明
 
 本專案為財務工程與程式作品展示，所有輸出僅供教育與研究用途，**不構成任何投資建議**。槓桿與借貸投資具高度風險，請自行審慎評估。

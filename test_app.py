@@ -279,6 +279,8 @@ class AppTests(unittest.TestCase):
 
     def test_disclaimer_is_shown_even_when_data_fails(self):
         self.assertIn("不構成任何投資建議", self.texts(self.start().caption))
+        self.assertIn("AGPL-3.0", self.texts(self.start().caption))
+        self.assertIn("github.com/Wayweiwayne/ETF-Leverage-Stress-Test", self.texts(self.start().caption))
         self.load_history.side_effect = ValueError("暫時無法取得資料")
         self.assertIn("不構成任何投資建議", self.texts(self.start().caption))
 

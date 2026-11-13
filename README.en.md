@@ -112,6 +112,17 @@ python -m unittest -v
 
 The tests need no network access: the engine is checked against synthetic data, and the UI tests run the whole app on stubbed market data. GitHub Actions runs them on Python 3.11, 3.12 and 3.13 on every push (`.github/workflows/tests.yml`).
 
+## License
+
+Copyright (C) 2026 Wayweiwayne
+
+The code is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0). You may use, modify
+and redistribute it; if you distribute a modified version, or run one as a website or service for others, you must
+publish your complete source under the same licence. The program comes with no warranty; see the licence for details.
+
+The licence covers the code only. The market data in `data/snapshots/` comes from Yahoo Finance, belongs to its
+original source and is not covered.
+
 ## Disclaimer
 
 This project is a financial-engineering and software showcase. Everything it outputs is for education and research only and **is not investment advice**. Borrowing to invest carries a high risk of loss; make your own careful assessment.
