@@ -8,6 +8,8 @@ import pandas as pd
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+from version import APP_VERSION
+
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
 MORTGAGE, CREDIT = "理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"
 SOURCES = ["本薪(自掏腰包)", "配息資金池", "緩衝金", "變賣資產(主標的)"]
@@ -62,6 +64,7 @@ class AppTests(unittest.TestCase):
 
     def test_defaults_render_results(self):
         at = self.start()
+        self.assertIn(f"({APP_VERSION})", at.title[0].value)
         self.assertEqual(len(at.error), 0)
         self.assertEqual(self.metric(at, "初期每月應繳"), "$67,199")
         self.assertIn("槓桿破產率 (現金流斷裂)", [m.label for m in at.metric])
