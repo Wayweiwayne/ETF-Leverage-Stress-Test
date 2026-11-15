@@ -30,7 +30,7 @@ The first month in which the payment cannot be covered, the strategy is **ruined
   - 🅱 **Monte Carlo (block bootstrap)** — resamples real monthly returns in blocks, which keeps multi-month crashes intact, and reports the share of simulated futures that end in ruin.
 - **Realistic loan model** — level amortisation, interest-only grace period with the payment jump afterwards, and a rate shock that recomputes the payment on the outstanding balance.
 - **Dividend model** — payouts rise and fall with the market (dividend beta), with a floor during crashes.
-- **Repayment waterfall** — dividend pool, cash buffer, selling the asset and salary are drawn in the order you choose; any of them can be left out.
+- **Repayment waterfall** — salary, dividend pool, cash buffer, selling the main asset and selling the second asset are drawn in the order you choose, and ruin is declared only when all are spent; any of them can be left out.
 - **Fire-sale discount** — forced selling in a crash month costs extra.
 - **Leveraged-ETF compounding and volatility decay** — months in which the second asset has no real data are modelled from the first with the standard leveraged-fund formula, without projecting any excess return it earned in the sample.
 - **Longer history** — a recently listed asset can borrow the pre-listing record of a similar, older one, so the test covers bear markets such as 2008.

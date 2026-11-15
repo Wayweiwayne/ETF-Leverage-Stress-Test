@@ -121,6 +121,58 @@ class WaterfallTests(unittest.TestCase):
         self.assertEqual(res.ruin_month[0], 3)
         self.assertEqual(one_path([0.0] * 4, [3_000] * 4, (E.SALARY,), salary_cap=4_000).ruin_month[0], 0)
 
+    def second_asset_path(self, order, returns=(0.0, 0.0), payment=15_000, **kwargs):
+        """All dividends (2% a month = 20,000) are reinvested into the second asset, priced at 1."""
+        return one_path(list(returns), [payment] * len(returns), order, div_yield=0.02,
+                        reinvest=True, ratio_b=1.0, **kwargs)
+
+    def test_second_asset_is_sold_when_ranked(self):
+        res = self.second_asset_path((E.SELL_B,))
+        self.assertFalse(res.ruined[0])
+        np.testing.assert_allclose(res.ledger['from_sell_b'][:, 0], [15_000, 15_000])
+        np.testing.assert_allclose(res.ledger['shares_b'][:, 0], [5_000, 10_000])   # +20,000 bought, -15,000 sold
+        np.testing.assert_allclose(res.ledger['shares_a'][:, 0], 10_000)            # main asset untouched
+
+    def test_second_asset_left_out_of_the_order_is_not_sold_even_at_ruin(self):
+        res = self.second_asset_path((E.SALARY,), salary_cap=0.0)
+        self.assertTrue(res.ruined[0])
+        self.assertEqual(res.ledger['from_sell_b'].sum(), 0)
+        self.assertAlmostEqual(res.ledger['shares_b'][0, 0], 20_000)
+
+    def test_main_asset_goes_first_when_ranked_ahead_of_the_second(self):
+        res = self.second_asset_path((E.SELL, E.SELL_B))
+        np.testing.assert_allclose(res.ledger['from_sell'][:, 0], [15_000, 15_000])
+        self.assertEqual(res.ledger['from_sell_b'].sum(), 0)
+
+    def test_second_asset_covers_what_the_first_sources_cannot(self):
+        res = self.second_asset_path((E.SALARY, E.SELL_B), salary_cap=4_000)
+        np.testing.assert_allclose(res.ledger['from_salary'][:, 0], [4_000, 4_000])
+        np.testing.assert_allclose(res.ledger['from_sell_b'][:, 0], [11_000, 11_000])
+
+    def test_second_asset_running_out_is_ruin(self):
+        res = self.second_asset_path((E.SELL_B,), payment=25_000)      # only 20,000 arrives each month
+        self.assertTrue(res.ruined[0])
+        self.assertEqual(res.ruin_month[0], 1)
+
+    def test_crash_haircut_applies_to_the_second_asset_too(self):
+        plain = self.second_asset_path((E.SELL_B,), returns=(-0.3,), payment=9_000)
+        hit = self.second_asset_path((E.SELL_B,), returns=(-0.3,), payment=9_000,
+                                     haircut_trigger=0.2, haircut_penalty=0.1)
+        self.assertAlmostEqual(plain.ledger['shares_b'][0, 0], 20_000 - 9_000)
+        self.assertAlmostEqual(hit.ledger['shares_b'][0, 0], 20_000 - 9_000 / 0.9)
+
+    def test_dividends_meant_for_a_wiped_out_second_asset_buy_the_first_instead(self):
+        months = 3
+        col = lambda v: np.full((months, 1), float(v))
+        ret_b = np.array([[-1.0], [0.0], [0.0]])            # the second asset goes to zero in month one
+        res = E.simulate_paths(col(0.0), ret_b, col(0.02), np.array([100.0]), np.array([1.0]), np.zeros(months),
+                               principal=1_000_000.0, buffer_cash=0.0, fee=0.0, reinvest=True, ratio_b=0.5,
+                               order=(E.SALARY,), salary_cap=col(0.0), record=True)
+        self.assertEqual(res.ledger['shares_b'].sum(), 0)
+        # 2% of the holding is reinvested each month, all of it into the first asset: nothing vanishes
+        np.testing.assert_allclose(res.ledger['shares_a'][:, 0], 10_000 * 1.02 ** np.arange(1, 4))
+        self.assertAlmostEqual(res.lev_final[0], 1_000_000 * 1.02 ** 3)
+
     def test_source_left_out_of_the_order_is_never_touched(self):
         res = one_path([0.0] * 2, [10_000] * 2, (E.SALARY,), salary_cap=4_000)
         self.assertTrue(res.ruined[0])
@@ -218,7 +270,7 @@ class RunTests(unittest.TestCase):
                 self.assertAlmostEqual(trace['lev_value'].iloc[-1], row['Lev_Final'], places=4)
                 self.assertAlmostEqual(trace['dca_value'].iloc[-1], row['DCA_Final'], places=4)
                 self.assertAlmostEqual(trace['loan_balance'].iloc[-1], 0.0, places=3)
-            paid = trace[['from_dividend', 'from_buffer', 'from_sell', 'from_salary']].sum(axis=1)
+            paid = trace[['from_dividend', 'from_buffer', 'from_sell', 'from_sell_b', 'from_salary']].sum(axis=1)
             ok = ~trace['defaulted']
             np.testing.assert_allclose(paid[ok], trace['payment'][ok])
         self.assertTrue(seen_ruin and seen_survivor, "fixture should exercise both outcomes")
@@ -288,6 +340,31 @@ class RunTests(unittest.TestCase):
         self.assertTrue(mc['Is_Ruined'].any() and (~mc['Is_Ruined']).any())
         self.assertTrue(((mc['Ruin_Month'] > 0) == mc['Is_Ruined']).all())
         self.assertTrue(mc['Ruin_Month'].between(0, 84).all())
+
+    def test_selling_the_second_asset_can_only_reduce_ruin(self):
+        df = market()
+        without = (E.SALARY, E.DIVIDEND, E.BUFFER, E.SELL)
+        stressed = dict(salary_cap=5_000.0, swan_month=6, swan_drop=0.3)
+        old = E.run_summary(df, params(source_order=without, **stressed))
+        new = E.run_summary(df, params(**stressed))                     # default order ends with the second asset
+        self.assertEqual(params().source_order[-1], E.SELL_B)
+        self.assertTrue((new.hist['Ruin_Prob'] <= old.hist['Ruin_Prob']).all())
+        self.assertFalse((new.mc['Is_Ruined'] & ~old.mc['Is_Ruined']).any())
+        self.assertLess(new.mc['Is_Ruined'].mean(), old.mc['Is_Ruined'].mean())
+        self.assertGreater(old.mc['Is_Ruined'].mean(), 0.05)
+
+    def test_ledger_shows_the_second_asset_being_sold_after_the_first_runs_out(self):
+        df = market()
+        # A 45% crash in the main asset alone leaves too little of it to see the loan through.
+        df['Price_Return_A'] = df['Price_Return_A'].where(np.arange(len(df)) != 14, -0.45)
+        df['Close_A'] = 20 * np.cumprod(1 + df['Price_Return_A'])
+        p = params(salary_cap=0.0, source_order=(E.SELL, E.SELL_B), reinvest_ratio_b=1.0)
+        trace = E.run_trace(df, p, 10)
+        sold_b = trace['from_sell_b'] > 0
+        self.assertTrue(sold_b.any())
+        first = int(np.argmax(sold_b.to_numpy()))
+        self.assertTrue((trace['from_sell'].iloc[first + 1:] < 1e-6).all())     # nothing left of the main asset
+        self.assertAlmostEqual(trace['shares_a'].iloc[first], 0, places=6)
 
     def test_fixed_seed_is_reproducible_and_seeds_differ(self):
         df = market()
