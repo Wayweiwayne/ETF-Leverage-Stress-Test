@@ -1,6 +1,8 @@
 import streamlit as st
 
-st.set_page_config(page_title="ETF 壓力測試系統 V33", layout="wide")
+from version import APP_VERSION
+
+st.set_page_config(page_title=f"ETF 壓力測試系統 {APP_VERSION}", layout="wide")
 
 pg = st.navigation([
     st.Page("main_page.py", title="壓力測試主頁", default=True),
