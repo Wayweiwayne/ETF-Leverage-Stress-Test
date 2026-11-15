@@ -12,7 +12,7 @@ from version import APP_VERSION
 
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
 MORTGAGE, CREDIT = "理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"
-SOURCES = ["本薪(自掏腰包)", "配息資金池", "緩衝金", "變賣資產(主標的)"]
+SOURCES = ["本薪(自掏腰包)", "配息資金池", "緩衝金", "變賣資產(主標的)", "變賣資產(第二標的)"]
 
 
 def fake_history(ticker):
@@ -60,7 +60,7 @@ class AppTests(unittest.TestCase):
         return next(m.value for m in at.metric if m.label == label)
 
     def order(self, at):
-        return [at.selectbox(key=f"p{i}").value for i in range(1, 5)]
+        return [box.value for box in at.selectbox if box.key in ("p1", "p2", "p3", "p4", "p5")]
 
     def test_defaults_render_results(self):
         at = self.start()
@@ -107,19 +107,42 @@ class AppTests(unittest.TestCase):
     def test_repayment_sources_cannot_repeat(self):
         at = self.start()
         self.assertEqual(self.order(at), SOURCES)
-        for slot in (1, 2, 3):
+        for slot in (1, 2, 3, 4):
             for source in at.selectbox(key=f"p{slot}").options:
                 self.ok(at.selectbox(key=f"p{slot}").set_value(source).run())
                 chosen = [s for s in self.order(at) if s != "（不使用）"]
                 self.assertEqual(len(chosen), len(set(chosen)), self.order(at))
 
     def test_a_source_can_be_left_out(self):
-        at = self.start(p1="3", p2="4", p3="4", p4="4")
-        self.assertEqual(self.order(at), ["變賣資產(主標的)", "（不使用）", "（不使用）", "（不使用）"])
-        self.assertIn("不會動用：本薪(自掏腰包)、配息資金池、緩衝金", [c.value for c in at.sidebar.caption])
+        at = self.start(p1="3", p2="4", p3="4", p4="4", p5="4")
+        self.assertEqual(self.order(at), ["變賣資產(主標的)"] + ["（不使用）"] * 4)
+        self.assertIn("不會動用：本薪(自掏腰包)、配息資金池、緩衝金、變賣資產(第二標的)", [c.value for c in at.sidebar.caption])
+        self.assertIn("第二標的沒有排進順位", self.texts(at.sidebar.caption))
+
+    def test_second_asset_is_a_source_only_when_there_is_one(self):
+        self.assertEqual(self.order(self.start()), SOURCES)
+        self.assertNotIn("第二標的沒有排進順位", self.texts(self.start().sidebar.caption))
+        for query in (dict(reinv="0"), dict(b="")):
+            with self.subTest(query):
+                at = self.start(**query)
+                self.assertEqual(self.order(at), SOURCES[:4])
+                self.assertNotIn("變賣資產(第二標的)", at.selectbox(key="p1").options)
+
+    def test_links_made_before_the_second_asset_was_a_source_still_mean_the_same(self):
+        # "4" has always meant "not used"; the new source takes the next number.
+        at = self.start(p1="3", p2="0", p3="4", p4="4", p5="5")
+        self.assertEqual(self.order(at), ["變賣資產(主標的)", "本薪(自掏腰包)", "（不使用）", "（不使用）", "變賣資產(第二標的)"])
+
+    def test_selling_the_second_asset_shows_in_the_ledger(self):
+        at = self.start(salary="0", p1="5", p2="3", p3="4", p4="4", p5="4", seed="1")
+        ledger = at.dataframe[0].value
+        self.assertGreater(ledger['變賣主資產'].sum(), 0)
+        self.assertIn('變賣第二標的', ledger.columns)
+        paid = ledger[['來自配息資金池', '來自緩衝金', '變賣主資產', '變賣第二標的', '本薪(自掏腰包)']].sum(axis=1)
+        np.testing.assert_allclose(paid[~ledger['破產(斷頭)']], ledger['每月應繳本息'][~ledger['破產(斷頭)']])
 
     def test_no_source_at_all_warns(self):
-        at = self.start(p1="4", p2="4", p3="4", p4="4")
+        at = self.start(p1="4", p2="4", p3="4", p4="4", p5="4")
         self.assertTrue(any("第一個月就會破產" in w.value for w in at.sidebar.warning))
         self.assertEqual(self.metric(at, "槓桿破產率 (現金流斷裂)"), "100.0%")
 

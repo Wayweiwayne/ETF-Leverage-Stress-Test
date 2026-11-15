@@ -9,8 +9,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-SALARY, DIVIDEND, BUFFER, SELL = "salary", "dividend", "buffer", "sell"
-SOURCES = (SALARY, DIVIDEND, BUFFER, SELL)
+SALARY, DIVIDEND, BUFFER, SELL, SELL_B = "salary", "dividend", "buffer", "sell", "sell_b"
+# SELL liquidates the main asset, SELL_B the second one that reinvested dividends bought.
+SOURCES = (SALARY, DIVIDEND, BUFFER, SELL, SELL_B)
 
 # Annual price returns (%) used to extend a start month whose real history is shorter than the loan.
 SCENARIOS = {
@@ -237,8 +238,9 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
 
     Return/yield matrices are (months, paths); `salary_cap` has the same shape. A month's
     dividend yield is the cash paid per share as a fraction of the previous month's price. Each
-    month the payment is collected from `order` in turn; a path that cannot cover it is ruined
-    for good and its final value is zero. With `record=True` the per-month ledger is returned
+    month the payment is collected from `order` in turn; a path that cannot cover it from the
+    sources listed is ruined for good and its final value is zero, whatever it still holds in
+    sources left out of `order`. A forced sale in a crash month costs extra for either asset. With `record=True` the per-month ledger is returned
     as well.
     """
     if dca_mode not in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT):
@@ -260,7 +262,7 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     dca_div_pools = np.zeros(n_paths)
 
     ledger = {k: [] for k in (
-        "from_dividend", "from_buffer", "from_sell", "from_salary", "defaulted",
+        "from_dividend", "from_buffer", "from_sell", "from_sell_b", "from_salary", "defaulted",
         "shares_a", "shares_b", "lev_value", "dca_value", "dca_contribution")} if record else None
 
     def lev_value():
@@ -280,10 +282,12 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
         div_per_share = prev_a * div_yield_a[i, :]
 
         current_div = shares_a * div_per_share
+        # A second asset that has gone to zero can no longer be bought; its share of the dividend buys the first.
+        share_to_b = np.where(prices_b > 0, ratio_b, 0.0)
         with np.errstate(divide='ignore', invalid='ignore'):
             if reinvest:
-                shares_b = shares_b + np.where(prices_b > 0, (current_div * ratio_b * (1 - fee)) / prices_b, 0.0)
-                shares_a = shares_a + np.where(prices_a > 0, (current_div * (1 - ratio_b) * (1 - fee)) / prices_a, 0.0)
+                shares_b = shares_b + np.where(prices_b > 0, (current_div * share_to_b * (1 - fee)) / prices_b, 0.0)
+                shares_a = shares_a + np.where(prices_a > 0, (current_div * (1 - share_to_b) * (1 - fee)) / prices_a, 0.0)
             else:
                 div_pools = div_pools + current_div
 
@@ -304,6 +308,10 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
                 pay = np.minimum(np.maximum(shares_a * prices_a * (1 - sell_cost), 0.0), rem)
                 with np.errstate(divide='ignore', invalid='ignore'):
                     shares_a = shares_a - np.where(prices_a > 0, (pay / (1 - sell_cost)) / prices_a, 0.0)
+            elif src == SELL_B:
+                pay = np.minimum(np.maximum(shares_b * prices_b * (1 - sell_cost), 0.0), rem)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    shares_b = shares_b - np.where(prices_b > 0, (pay / (1 - sell_cost)) / prices_b, 0.0)
             else:
                 pay = np.minimum(np.maximum(salary_cap[i, :], 0.0), rem)
             used[src] = pay
@@ -323,9 +331,9 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
         dca_divs = dca_shares_a * div_per_share
         with np.errstate(divide='ignore', invalid='ignore'):
             if reinvest:
-                dca_shares_b = dca_shares_b + np.where(prices_b > 0, (dca_divs * ratio_b * (1 - fee)) / prices_b, 0.0)
+                dca_shares_b = dca_shares_b + np.where(prices_b > 0, (dca_divs * share_to_b * (1 - fee)) / prices_b, 0.0)
                 dca_shares_a = dca_shares_a + np.where(
-                    prices_a > 0, ((dca_divs * (1 - ratio_b) + contribution) * (1 - fee)) / prices_a, 0.0)
+                    prices_a > 0, ((dca_divs * (1 - share_to_b) + contribution) * (1 - fee)) / prices_a, 0.0)
             else:
                 dca_div_pools = dca_div_pools + dca_divs
                 dca_shares_a = dca_shares_a + np.where(
@@ -336,6 +344,7 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
             ledger["from_dividend"].append(used[DIVIDEND])
             ledger["from_buffer"].append(used[BUFFER])
             ledger["from_sell"].append(used[SELL])
+            ledger["from_sell_b"].append(used[SELL_B])
             ledger["from_salary"].append(used[SALARY])
             ledger["defaulted"].append(defaulted)
             ledger["shares_a"].append(shares_a)
@@ -728,6 +737,7 @@ def run_trace(df, params, anchor_idx):
         "from_dividend": ledger["from_dividend"][:last, 0],
         "from_buffer": ledger["from_buffer"][:last, 0],
         "from_sell": ledger["from_sell"][:last, 0],
+        "from_sell_b": ledger["from_sell_b"][:last, 0],
         "from_salary": ledger["from_salary"][:last, 0],
         "dca_contribution": ledger["dca_contribution"][:last, 0],
         "shares_a": ledger["shares_a"][:last, 0],

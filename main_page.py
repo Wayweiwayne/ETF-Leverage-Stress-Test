@@ -14,14 +14,19 @@ LOAN_TYPES = ["理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/
 # 各貸款類型的預設值：(年利率 %, 年限, 是否預設啟用寬限期)
 LOAN_DEFAULTS = {LOAN_TYPES[0]: (2.5, 20, True), LOAN_TYPES[1]: (3.5, 7, False)}
 
+SELL_B_LABEL = "變賣資產(第二標的)"
 SOURCE_BY_LABEL = {
     "本薪(自掏腰包)": engine.SALARY,
     "配息資金池": engine.DIVIDEND,
     "緩衝金": engine.BUFFER,
     "變賣資產(主標的)": engine.SELL,
+    SELL_B_LABEL: engine.SELL_B,
 }
 SOURCE_LABELS = list(SOURCE_BY_LABEL)
 NO_SOURCE = "（不使用）"
+# Links store a choice by its position here, so new entries go at the end.
+SOURCE_UNIVERSE = SOURCE_LABELS[:4] + [NO_SOURCE, SELL_B_LABEL]
+SLOT_NAMES = ["第一順位", "第二順位", "第三順位", "第四順位", "第五順位"]
 
 SCENARIO_BY_LABEL = {
     "2008 黑天鵝復刻 (先暴跌後復甦)": "crash_2008",
@@ -124,24 +129,29 @@ with st.sidebar:
     st.header("3. 每月還款的錢從哪來")
     st.caption("設定每月繳貸款時，優先動用哪一筆錢。系統會從第一順位開始用，不夠才往下一個。"
                "每個來源只能排一次；不想動用的來源，把多出來的順位選成「（不使用）」即可。")
-    prio_help = "最先動用的資金來源。本薪=自己掏錢；配息資金池=累積的股息；緩衝金=一開始預留的現金；變賣資產=賣股票換現金。"
+    prio_help = ("最先動用的資金來源。本薪=自己掏錢；配息資金池=累積的股息；緩衝金=一開始預留的現金；"
+                 "變賣資產(主標的)=賣掉用貸款買的那檔；變賣資產(第二標的)=賣掉用配息買進的第二檔。")
+    # 有第二標的時才有東西可賣
+    available_sources = [s_ for s_ in SOURCE_LABELS if s_ != SELL_B_LABEL or (is_reinvest and ticker_b.strip())]
     strat_labels = []
-    for slot, slot_name in enumerate(["第一順位", "第二順位", "第三順位", "第四順位"], start=1):
-        remaining = [s for s in SOURCE_LABELS if s not in strat_labels]
+    for slot, slot_name in enumerate(SLOT_NAMES[:len(available_sources)], start=1):
+        remaining = [s_ for s_ in available_sources if s_ not in strat_labels]
         picked = ui.choice(f"p{slot}", slot_name, remaining + [NO_SOURCE], remaining[0],
-                           universe=SOURCE_LABELS + [NO_SOURCE], help=prio_help if slot == 1 else None)
+                           universe=SOURCE_UNIVERSE, help=prio_help if slot == 1 else None)
         if picked != NO_SOURCE:
             strat_labels.append(picked)
-    strat_order = tuple(SOURCE_BY_LABEL[s] for s in strat_labels)
+    strat_order = tuple(SOURCE_BY_LABEL[s_] for s_ in strat_labels)
     if strat_labels:
         st.caption("實際動用順序：" + " → ".join(strat_labels))
-        unused = [s for s in SOURCE_LABELS if s not in strat_labels]
+        unused = [s_ for s_ in available_sources if s_ not in strat_labels]
         if unused:
             st.caption("不會動用：" + "、".join(unused))
+        if SELL_B_LABEL in unused:
+            st.caption("ℹ️ 第二標的沒有排進順位：就算手上還有第二標的，其他來源用完時仍會判定破產。")
         if is_reinvest and "配息資金池" in strat_labels:
             st.caption("ℹ️ 你開啟了「配息再投入」，配息一領到就拿去買股票，所以配息資金池不會有錢，這個順位實際上不會出到力。")
     else:
-        st.warning("四個順位都選了「（不使用）」，等於沒有任何錢可以繳貸款，第一個月就會破產。")
+        st.warning("所有順位都選了「（不使用）」，等於沒有任何錢可以繳貸款，第一個月就會破產。")
 
     max_salary_support = ui.number("salary", "每月最多自己補貼多少 (元)", 25000, 1000, min_value=0,
                                    help="當其他來源都不夠繳貸款時，你每個月最多願意從薪水掏多少出來補。設太高，幾乎不會破產（因為一直有薪水撐）；設低一點，比較能看出策略本身扛不扛得住。")
@@ -568,6 +578,7 @@ else:
             '來自配息資金池': trace['from_dividend'],
             '來自緩衝金': trace['from_buffer'],
             '變賣主資產': trace['from_sell'],
+            '變賣第二標的': trace['from_sell_b'],
             '本薪(自掏腰包)': trace['from_salary'],
             'DCA 當月投入': trace['dca_contribution'],
             '主資產股數': trace['shares_a'],
@@ -582,8 +593,9 @@ else:
         st.plotly_chart(fig1, width='stretch')
 
         st.markdown("##### 槓桿策略：每月貸款繳納資金來源拆解")
-        fig2 = px.bar(df_trace, x='真實/預測月份', y=['來自配息資金池', '來自緩衝金', '變賣主資產', '本薪(自掏腰包)'],
-                      color_discrete_map={'來自配息資金池': '#F1C40F', '來自緩衝金': '#2ECC71', '變賣主資產': '#3498DB', '本薪(自掏腰包)': '#E74C3C'},
+        fig2 = px.bar(df_trace, x='真實/預測月份', y=['來自配息資金池', '來自緩衝金', '變賣主資產', '變賣第二標的', '本薪(自掏腰包)'],
+                      color_discrete_map={'來自配息資金池': '#F1C40F', '來自緩衝金': '#2ECC71', '變賣主資產': '#3498DB',
+                                          '變賣第二標的': '#8E44AD', '本薪(自掏腰包)': '#E74C3C'},
                       hover_data={'相對期數': True}, labels={'value': '當月繳款金額 (元)', 'variable': ''})
         fig2.update_xaxes(type='category', tickmode='array', tickvals=month_labels[::tick_step])
         st.plotly_chart(fig2, width='stretch')
