@@ -296,6 +296,27 @@ class AppTests(unittest.TestCase):
         self.assertIn("沒有任何配息", self.texts(self.start(a="00631L.TW").warning))
         self.assertNotIn("沒有任何配息", self.texts(self.start(a="00631L.TW", div="0").warning))
 
+    def test_monte_carlo_uses_recorded_dividends_unless_told_otherwise(self):
+        mc_labels = ["槓桿破產率 (現金流斷裂)", "槓桿擊敗 DCA 勝率"]
+
+        def mc_metrics(at):
+            values = [m.value for m in at.metric]
+            return values[-4:]                                  # the Monte Carlo column comes last
+
+        default = self.start()
+        self.assertIn("配息跟著報酬一起從歷史重抽", self.texts(default.caption))
+        self.assertTrue(all(label in [m.label for m in default.metric] for label in mc_labels))
+        self.assertEqual(mc_metrics(self.start(div="12")), mc_metrics(default))          # the slider is not involved
+
+        assumed = self.start(mcdiv="1")
+        self.assertIn("配息照你設定的「未來平均股息」計算", self.texts(assumed.caption))
+        self.assertNotEqual(mc_metrics(self.start(mcdiv="1", div="12")), mc_metrics(assumed))
+
+    def test_dividend_warning_says_what_the_assumed_yield_affects(self):
+        self.assertIn("歷史資料用完之後的未來情境，配息是照你設的數字算的", self.texts(self.start(div="12").warning))
+        self.assertIn("蒙地卡羅和歷史資料用完之後的未來情境，配息是照你設的數字算的",
+                      self.texts(self.start(div="12", mcdiv="1").warning))
+
     def test_empty_dividend_pool_is_pointed_out_when_dividends_are_reinvested(self):
         self.assertIn("配息資金池不會有錢", self.texts(self.start().sidebar.caption))
         self.assertNotIn("配息資金池不會有錢", self.texts(self.start(reinv="0").sidebar.caption))
