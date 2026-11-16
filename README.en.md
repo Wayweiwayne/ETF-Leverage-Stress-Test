@@ -28,8 +28,9 @@ The first month in which the payment cannot be covered, the strategy is **ruined
 - **Two risk engines**
   - 🅰 **Rolling history with scenario splicing** — every past month is treated as an entry point. Where real history is shorter than the loan, the remainder is filled with a chosen scenario (for example a 2008-style crash and recovery).
   - 🅱 **Monte Carlo (block bootstrap)** — resamples real monthly returns in blocks, which keeps multi-month crashes intact, and reports the share of simulated futures that end in ruin.
-- **Realistic loan model** — level amortisation, interest-only grace period with the payment jump afterwards, and a rate shock that recomputes the payment on the outstanding balance.
-- **Dividend model** — payouts rise and fall with the market (dividend beta), with a floor during crashes.
+- **Realistic loan model** — level amortisation, interest-only grace period with the payment jump afterwards, and a rate shock that recomputes the payment on the outstanding balance. A floating rate can follow a yearly schedule, with random moves on top in the Monte Carlo.
+- **Dividend model** — payouts rise and fall with the market (dividend beta), with a floor during crashes, paid monthly, quarterly, half-yearly or yearly.
+- **Taxes and fees** — transaction tax, the health-insurance levy on dividends, dividend income tax and a loan origination fee, defaulting to Taiwan's current rates.
 - **Repayment waterfall** — salary, dividend pool, cash buffer, selling the main asset and selling the second asset are drawn in the order you choose, and ruin is declared only when all are spent; any of them can be left out.
 - **Fire-sale discount** — forced selling in a crash month costs extra.
 - **Leveraged-ETF compounding and volatility decay** — months in which the second asset has no real data are modelled from the first with the standard leveraged-fund formula, without projecting any excess return it earned in the sample.

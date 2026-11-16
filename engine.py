@@ -91,6 +91,22 @@ class SimParams:
     dca_mode: str = DCA_MATCH_OUT_OF_POCKET
     mc_dividends: str = MC_DIVIDENDS_HISTORY
 
+    # Floating rate: change in the annual rate, in percentage points, at the start of loan year 2, 3, ...
+    rate_path_pct: tuple = ()
+    # Monte Carlo only: standard deviation of a further random change each year, in percentage points.
+    rate_volatility_pct: float = 0.0
+
+    # Taxes and fees. All zero by default; a front end supplies the rates of its jurisdiction.
+    sell_tax: float = 0.0                 # securities transaction tax on every sale
+    dividend_tax_rate: float = 0.0        # net income tax on dividends
+    nhi_rate: float = 0.0                 # health-insurance levy on a single payout ...
+    nhi_threshold: float = 20_000.0       # ... of at least this much
+    dividend_taxable_share: float = 1.0   # part of a payout that counts as dividend income
+    loan_fee: float = 0.0                 # one-off fee taken out of the loan proceeds
+
+    # Modelled dividends are paid every this many months; 0 means as often as the asset's record shows.
+    dividend_interval_months: int = 1
+
 
 @dataclass(frozen=True)
 class LoanSchedule:
@@ -122,6 +138,9 @@ class EngineResults:
     job_loss_any_rate: float
     job_loss_avg_months: float
     mc_dividend_yield: float    # average annual dividend yield across the Monte Carlo paths
+    dividend_interval: int      # months between modelled payouts actually used
+    mc_final_rate_p5: float     # annual loan rate (%) in the last month across Monte Carlo paths
+    mc_final_rate_p95: float
     hist_replicates: int        # unemployment draws per entry month (1 unless job loss is random)
     modelled_b_months: int      # historical months in which the second asset had to be modelled
     trace: pd.DataFrame | None = None  # month-by-month ledger of one entry month
@@ -141,6 +160,7 @@ class _Market:
     beta_b: float
     resid_std_b: float
     decay: float
+    dividend_interval: int
 
 
 def parse_annual_returns(text):
@@ -156,59 +176,93 @@ def parse_annual_returns(text):
     return values
 
 
+def parse_rate_path(text):
+    """Parse "0.25, 0.25, -0.125" into yearly rate changes in percentage points."""
+    try:
+        values = tuple(float(x.strip()) for x in str(text).split(",") if x.strip())
+    except ValueError:
+        raise ValueError("每年利率變動必須是用逗號分開的數字，例如「0.25, 0.25, -0.125」。") from None
+    if any((not np.isfinite(v)) or abs(v) > 10 for v in values):
+        raise ValueError("每年利率變動必須介於 -10 與 10 個百分點之間。")
+    return values
+
+
+def annual_rate_path(annual_rate_pct, total_months, shock_year=0, shock_delta_pct=0.0, rate_path_pct=()):
+    """The loan's annual rate in percent for every month.
+
+    A one-off shock applies from the first month of `shock_year`. `rate_path_pct[k]` is a further
+    change at the start of loan year k + 2 (the first year's rate is the contract rate); once the
+    list runs out the rate stays where it is. The rate never goes below zero.
+    """
+    rates = np.full(total_months, float(annual_rate_pct))
+    if shock_year > 0:
+        rates[(shock_year - 1) * 12:] += shock_delta_pct
+    for k, delta in enumerate(rate_path_pct):
+        rates[(k + 1) * 12:] += delta
+    return np.maximum(rates, 0.0)
+
+
+def schedule_from_rates(principal, annual_rates_pct, grace_months):
+    """Payment schedule for a rate that may change month by month.
+
+    `annual_rates_pct` has shape (months,) or (months, paths). Interest-only during the grace
+    period; afterwards each month's payment is the level payment that clears the outstanding
+    balance over the remaining term at that month's rate. With an unchanged rate that is the
+    ordinary fixed instalment; when the rate moves the instalment is re-set and the term stays.
+    """
+    rates = np.asarray(annual_rates_pct, dtype=float) / 100 / 12
+    months = rates.shape[0]
+    payments, start_bal, end_bal = np.zeros_like(rates), np.zeros_like(rates), np.zeros_like(rates)
+    bal = np.full(rates.shape[1:], float(principal))
+    for t in range(months):
+        r = rates[t]
+        start_bal[t] = bal
+        interest = bal * r
+        if t < grace_months:
+            pmt, principal_paid = interest, 0.0
+        else:
+            n_left = months - t
+            with np.errstate(divide='ignore', invalid='ignore'):
+                pmt = np.where(r > 0, bal * r / (1 - (1 + r) ** -n_left), bal / n_left)
+            principal_paid = np.maximum(pmt - interest, 0.0)
+        payments[t] = pmt
+        bal = np.maximum(bal - principal_paid, 0.0)
+        end_bal[t] = bal
+    return LoanSchedule(payments, rates, start_bal, end_bal)
+
+
 def build_loan_schedule(principal, annual_rate_pct, total_months, grace_months=0,
-                        shock_year=0, shock_delta_pct=0.0):
+                        shock_year=0, shock_delta_pct=0.0, rate_path_pct=()):
     """Month-by-month payment schedule.
 
-    Interest-only during the grace period, level amortisation afterwards. From the first
-    month of `shock_year` the rate rises by `shock_delta_pct` and the payment is recomputed
-    on the outstanding balance over the remaining term (the term itself does not change).
+    Interest-only during the grace period, level amortisation afterwards. Whenever the rate
+    changes (see annual_rate_path) the payment is recomputed on the outstanding balance over
+    the remaining term; the term itself does not change.
     """
     if total_months < 1:
         raise ValueError("貸款期數至少需要 1 個月。")
     if not 0 <= grace_months < total_months:
         raise ValueError("寬限期必須短於貸款總年限。")
+    rates = annual_rate_path(annual_rate_pct, total_months, shock_year, shock_delta_pct, rate_path_pct)
+    return schedule_from_rates(principal, rates, grace_months)
 
-    def amort_pmt(balance, r_m, n_left):
-        if n_left <= 0:
-            return balance * (1 + r_m)
-        if r_m <= 0:
-            return balance / n_left
-        return balance * r_m / (1 - (1 + r_m) ** -n_left)
 
-    shock_idx = (shock_year - 1) * 12 if shock_year > 0 else None
-    payments = np.zeros(total_months)
-    rates = np.zeros(total_months)
-    start_bal = np.zeros(total_months)
-    end_bal = np.zeros(total_months)
+def monte_carlo_rate_paths(p, rng, n_paths):
+    """Annual loan rate (%) per month for the Monte Carlo: the set path plus a random walk.
 
-    bal = float(principal)
-    r_m = (annual_rate_pct / 100) / 12
-    pmt_amort = amort_pmt(bal, r_m, total_months - grace_months)
-
-    for t in range(total_months):
-        if shock_idx is not None and t == shock_idx:
-            r_m = ((annual_rate_pct + shock_delta_pct) / 100) / 12
-            if t >= grace_months:
-                pmt_amort = amort_pmt(bal, r_m, total_months - t)
-
-        rates[t] = r_m
-        start_bal[t] = bal
-        interest = bal * r_m
-
-        if t < grace_months:
-            pmt, principal_paid = interest, 0.0
-        else:
-            if t == grace_months and (shock_idx is None or t != shock_idx):
-                pmt_amort = amort_pmt(bal, r_m, total_months - grace_months)
-            pmt = pmt_amort
-            principal_paid = max(0.0, pmt - interest)
-
-        payments[t] = pmt
-        bal = max(0.0, bal - principal_paid)
-        end_bal[t] = bal
-
-    return LoanSchedule(payments, rates, start_bal, end_bal)
+    Each loan year after the first, every path's rate moves by a further normal draw with
+    standard deviation `rate_volatility_pct`; the moves accumulate. Without volatility this is
+    just the deterministic path, returned with shape (months,).
+    """
+    base = annual_rate_path(p.annual_rate_pct, p.total_months, p.rate_shock_year, p.rate_shock_delta_pct,
+                            p.rate_path_pct)
+    if p.rate_volatility_pct <= 0:
+        return base
+    years = -(-p.total_months // 12)
+    moves = rng.normal(0.0, p.rate_volatility_pct, size=(years, n_paths))
+    moves[0] = 0.0
+    drift = np.repeat(np.cumsum(moves, axis=0), 12, axis=0)[:p.total_months]
+    return np.maximum(base[:, None] + drift, 0.0)
 
 
 def buffer_cash_for(schedule, grace_months, buffer_months, principal):
@@ -239,15 +293,21 @@ def _unique_order(order):
 
 def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, principal, buffer_cash,
                    fee, reinvest, ratio_b, order, salary_cap, haircut_trigger=1.0, haircut_penalty=0.0,
-                   dca_mode=DCA_MATCH_OUT_OF_POCKET, record=False):
+                   dca_mode=DCA_MATCH_OUT_OF_POCKET, record=False, sell_tax=0.0, dividend_tax_rate=0.0,
+                   nhi_rate=0.0, nhi_threshold=0.0, dividend_taxable_share=1.0, loan_fee=0.0):
     """Run the leveraged strategy and its no-loan comparison over every path at once.
 
     Return/yield matrices are (months, paths); `salary_cap` has the same shape. A month's
     dividend yield is the cash paid per share as a fraction of the previous month's price. Each
     month the payment is collected from `order` in turn; a path that cannot cover it from the
     sources listed is ruined for good and its final value is zero, whatever it still holds in
-    sources left out of `order`. A forced sale in a crash month costs extra for either asset. With `record=True` the per-month ledger is returned
-    as well.
+    sources left out of `order`. A forced sale in a crash month costs extra for either asset.
+
+    `payments` is (months,) or, when each path has its own loan rate, (months, paths). Every sale
+    pays `fee` plus `sell_tax`. Each dividend payout loses `dividend_tax_rate` of its taxable share,
+    plus `nhi_rate` of it when that share reaches `nhi_threshold`; the comparison portfolio is taxed
+    by the same rules on its own, smaller payouts. With `record=True` the per-month ledger is
+    returned as well.
     """
     if dca_mode not in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT):
         raise ValueError(f"未知的 DCA 對照模式：{dca_mode}")
@@ -256,7 +316,8 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
 
     prices_a = np.array(price_a0, dtype=float)
     prices_b = np.array(price_b0, dtype=float)
-    shares_a = (principal - buffer_cash) * (1 - fee) / prices_a
+    shares_a = (principal - buffer_cash - loan_fee) * (1 - fee) / prices_a
+    exit_cost = fee + sell_tax
     shares_b = np.zeros(n_paths)
     div_pools = np.zeros(n_paths)
     buf_vals = np.full(n_paths, float(buffer_cash))
@@ -269,25 +330,31 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
 
     ledger = {k: [] for k in (
         "from_dividend", "from_buffer", "from_sell", "from_sell_b", "from_salary", "defaulted",
-        "shares_a", "shares_b", "lev_value", "dca_value", "dca_contribution")} if record else None
+        "shares_a", "shares_b", "lev_value", "dca_value", "dca_contribution", "dividend_tax")} if record else None
 
     def lev_value():
-        value = shares_a * prices_a * (1 - fee) + div_pools + buf_vals
-        return value + shares_b * prices_b * (1 - fee) if reinvest else value
+        value = shares_a * prices_a * (1 - exit_cost) + div_pools + buf_vals
+        return value + shares_b * prices_b * (1 - exit_cost) if reinvest else value
 
     def dca_value():
-        value = dca_shares_a * prices_a * (1 - fee) + dca_div_pools
-        return value + dca_shares_b * prices_b * (1 - fee) if reinvest else value
+        value = dca_shares_a * prices_a * (1 - exit_cost) + dca_div_pools
+        return value + dca_shares_b * prices_b * (1 - exit_cost) if reinvest else value
+
+    def dividend_levy(gross):
+        taxable = gross * dividend_taxable_share
+        return taxable * dividend_tax_rate + np.where(taxable >= nhi_threshold, taxable * nhi_rate, 0.0)
 
     for i in range(months):
-        pmt = float(payments[i])
+        pmt = payments[i]
         ret_a_i = ret_a[i, :]
         prev_a = prices_a
         prices_a = prices_a * (1 + ret_a_i)
         prices_b = prices_b * (1 + ret_b[i, :])
         div_per_share = prev_a * div_yield_a[i, :]
 
-        current_div = shares_a * div_per_share
+        gross_div = shares_a * div_per_share
+        levy = dividend_levy(gross_div)
+        current_div = gross_div - levy
         # A second asset that has gone to zero can no longer be bought; its share of the dividend buys the first.
         share_to_b = np.where(prices_b > 0, ratio_b, 0.0)
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -297,9 +364,9 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
             else:
                 div_pools = div_pools + current_div
 
-        sell_cost = np.full(n_paths, fee, dtype=float)
+        sell_cost = np.full(n_paths, exit_cost, dtype=float)
         if haircut_penalty > 0:
-            sell_cost = np.where(ret_a_i < -haircut_trigger, np.minimum(0.99, fee + haircut_penalty), fee)
+            sell_cost = np.where(ret_a_i < -haircut_trigger, np.minimum(0.99, exit_cost + haircut_penalty), exit_cost)
 
         rem = np.where(is_ruined, 0.0, pmt)
         used = {src: np.zeros(n_paths) for src in SOURCES}
@@ -326,7 +393,7 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
         defaulted = (rem > 1e-5) & (~is_ruined)
 
         if dca_mode == DCA_FULL_PAYMENT:
-            contribution = np.full(n_paths, pmt)
+            contribution = np.broadcast_to(np.asarray(pmt, dtype=float), (n_paths,)).copy()
         else:
             # A path that already went bust no longer pays anything; its comparison portfolio
             # keeps investing what salary could have covered.
@@ -334,7 +401,8 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
         is_ruined = is_ruined | defaulted
         ruin_month[defaulted] = i + 1
 
-        dca_divs = dca_shares_a * div_per_share
+        dca_gross = dca_shares_a * div_per_share
+        dca_divs = dca_gross - dividend_levy(dca_gross)
         with np.errstate(divide='ignore', invalid='ignore'):
             if reinvest:
                 dca_shares_b = dca_shares_b + np.where(prices_b > 0, (dca_divs * share_to_b * (1 - fee)) / prices_b, 0.0)
@@ -358,6 +426,7 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
             ledger["lev_value"].append(lev_value())
             ledger["dca_value"].append(dca_value())
             ledger["dca_contribution"].append(contribution)
+            ledger["dividend_tax"].append(levy)
 
     lev_final = lev_value()
     lev_final[is_ruined] = 0
@@ -366,14 +435,38 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     return PathResults(is_ruined, lev_final, dca_value(), ruin_month, ledger)
 
 
-def dividend_model_yields(price_path, p_init, base_ann_yield, beta):
+def lump_dividends(monthly_amounts, interval):
+    """Turn an even monthly payout into one every `interval` months (months run along axis 0).
+
+    A payout month pays `interval` times its monthly amount and the months in between pay nothing,
+    so the annual total is about the same while the cash arrives in fewer, larger pieces.
+    """
+    if interval <= 1:
+        return monthly_amounts
+    out = np.zeros_like(monthly_amounts)
+    paying = (np.arange(monthly_amounts.shape[0]) + 1) % interval == 0
+    out[paying] = monthly_amounts[paying] * interval
+    return out
+
+
+def infer_dividend_interval(div_yields, window=36):
+    """Months between payouts suggested by the latest record: 1, 3, 6 or 12."""
+    recent = np.asarray(div_yields)[-window:]
+    payouts = int((recent > 0).sum())
+    if payouts == 0:
+        return 1
+    gap = len(recent) / payouts
+    return min((1, 3, 6, 12), key=lambda k: abs(np.log(k / gap)))
+
+
+def dividend_model_yields(price_path, p_init, base_ann_yield, beta, interval=1):
     """Dividend-beta model: payout scales with cumulative return, floored at 10% of the base amount.
 
     Returned as a fraction of the previous month's price, the convention simulate_paths expects.
     """
     base_div_amt = p_init * base_ann_yield / 12.0
     cum_ret = (price_path / p_init) - 1.0
-    div_amt = np.maximum(base_div_amt * 0.1, base_div_amt * (1 + cum_ret * beta))
+    div_amt = lump_dividends(np.maximum(base_div_amt * 0.1, base_div_amt * (1 + cum_ret * beta)), interval)
     previous = np.concatenate((np.full_like(price_path[:1], p_init), price_path[:-1]), axis=0)
     with np.errstate(divide='ignore', invalid='ignore'):
         return np.where(previous > 0, div_amt / previous, 0.0)
@@ -451,6 +544,14 @@ def validate_params(p):
     need(p.block_size >= 1, "區塊長度至少 1 個月。")
     need(p.dca_mode in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT), f"未知的 DCA 對照模式：{p.dca_mode}")
     need(p.mc_dividends in (MC_DIVIDENDS_HISTORY, MC_DIVIDENDS_MODEL), f"未知的蒙地卡羅配息來源：{p.mc_dividends}")
+    need(all(finite(d) and abs(d) <= 10 for d in p.rate_path_pct), "每年利率變動必須介於 -10 與 10 個百分點之間。")
+    need(finite(p.rate_volatility_pct) and 0 <= p.rate_volatility_pct <= 5, "利率隨機波動必須介於 0 與 5 個百分點。")
+    need(0 <= p.sell_tax < 1 and p.fee + p.sell_tax < 1, "賣出的稅費合計必須低於 100%。")
+    need(0 <= p.dividend_tax_rate <= 1 and 0 <= p.nhi_rate <= 1 and p.dividend_tax_rate + p.nhi_rate <= 1,
+         "股利的稅率與補充保費費率必須介於 0 與 100%，合計不可超過 100%。")
+    need(p.nhi_threshold >= 0 and 0 <= p.dividend_taxable_share <= 1, "補充保費門檻或股利所得比例超出範圍。")
+    need(finite(p.loan_fee) and 0 <= p.loan_fee < p.principal, "貸款開辦費必須小於貸款本金。")
+    need(p.dividend_interval_months in (0, 1, 3, 6, 12), "配息頻率必須是每 1、3、6 或 12 個月（或 0 代表依歷史判斷）。")
     _unique_order(p.source_order)
     job = p.job_loss
     need(job.mode in (JOB_LOSS_NONE, JOB_LOSS_MANUAL, JOB_LOSS_RANDOM), f"未知的失業模型：{job.mode}")
@@ -492,7 +593,8 @@ def monte_carlo_inputs(m, p, rng):
     if p.mc_dividends == MC_DIVIDENDS_HISTORY:
         div_a = m.div_a[idx]
     else:
-        div_a = dividend_model_yields(np.cumprod(1 + ret_a, axis=0), 1.0, p.base_div_yield, p.div_beta)
+        div_a = dividend_model_yields(np.cumprod(1 + ret_a, axis=0), 1.0, p.base_div_yield, p.div_beta,
+                                      m.dividend_interval)
     return ret_a, ret_b, div_a
 
 
@@ -567,8 +669,9 @@ def _prepare_market(df, p):
             noise = rng.normal(0, resid_std_b, size=modelled) if resid_std_b > 0 else 0.0
             ret_b[missing] = modelled_second_asset_return(ret_a[missing], noise, beta_b, decay, p.vol_drag)
             close_b[missing] = close_b[real][0]  # only relative moves matter; any positive level will do
+    interval = p.dividend_interval_months or infer_dividend_interval(div_a)
     return _Market(n, ret_a, div_a, close_a, synthetic_a, has_b, ret_b, close_b, modelled,
-                   beta_b, resid_std_b, decay)
+                   beta_b, resid_std_b, decay, int(interval))
 
 
 def _history_paths(m, p):
@@ -607,6 +710,7 @@ def _history_paths(m, p):
             p_prev, p_next = path[:-1], path[1:]
             base_div = p_end * p.base_div_yield / 12.0
             div_amt = np.maximum(base_div * 0.1, base_div * (1 + ((p_next / p_end) - 1) * p.div_beta))
+            div_amt = lump_dividends(div_amt, m.dividend_interval)
             with np.errstate(divide='ignore', invalid='ignore'):
                 div_a[win:, i] = np.where(p_prev > 0, div_amt / p_prev, 0.0)
 
@@ -633,15 +737,20 @@ def _history_caps(ret_a_hist, p):
 def _common_args(p, schedule, buffer_cash, ratio_b):
     return dict(payments=schedule.payments, principal=p.principal, buffer_cash=buffer_cash, fee=p.fee,
                 reinvest=p.reinvest, ratio_b=ratio_b, order=p.source_order,
-                haircut_trigger=p.haircut_trigger, haircut_penalty=p.haircut_penalty, dca_mode=p.dca_mode)
+                haircut_trigger=p.haircut_trigger, haircut_penalty=p.haircut_penalty, dca_mode=p.dca_mode,
+                sell_tax=p.sell_tax, dividend_tax_rate=p.dividend_tax_rate, nhi_rate=p.nhi_rate,
+                nhi_threshold=p.nhi_threshold, dividend_taxable_share=p.dividend_taxable_share,
+                loan_fee=p.loan_fee)
 
 
 def _setup(df, p):
     validate_params(p)
     market = _prepare_market(df, p)
     schedule = build_loan_schedule(p.principal, p.annual_rate_pct, p.total_months, p.grace_months,
-                                   p.rate_shock_year, p.rate_shock_delta_pct)
-    buffer_cash = buffer_cash_for(schedule, p.grace_months, p.buffer_months, p.principal)
+                                   p.rate_shock_year, p.rate_shock_delta_pct, p.rate_path_pct)
+    # The fee comes out of the proceeds first; the buffer can take at most what is left.
+    buffer_cash = min(buffer_cash_for(schedule, p.grace_months, p.buffer_months, p.principal),
+                      p.principal - p.loan_fee)
     ratio_b = p.reinvest_ratio_b if market.has_b else 0.0
     return market, schedule, _common_args(p, schedule, buffer_cash, ratio_b), buffer_cash
 
@@ -685,6 +794,7 @@ def run_summary(df, params):
     block = int(max(1, min(p.block_size, n)))
     mc_ok = n >= 2
     any_rate, avg_months, mc_dividend_yield = 0.0, 0.0, 0.0
+    rate_p5 = rate_p95 = float(schedule.monthly_rates[-1] * 12 * 100)
     if mc_ok:
         n_paths = int(p.mc_paths)
         ret_a_mc, ret_b_mc, div_a_mc = monte_carlo_inputs(m, p, np.random.RandomState(p.seed))
@@ -700,9 +810,17 @@ def run_summary(df, params):
             base = salary_cap_schedule(p.salary_cap, p.job_loss, months)
             caps_mc = np.repeat(base.reshape(-1, 1), n_paths, axis=1)
 
+        # Each path may carry its own loan rate, hence its own payments.
+        rate_rng = np.random.RandomState(None if p.seed is None else p.seed + 2)
+        rates_mc = monte_carlo_rate_paths(p, rate_rng, n_paths)
+        final_rates = np.atleast_1d(rates_mc[-1])
+        rate_p5, rate_p95 = (float(np.percentile(final_rates, q)) for q in (5, 95))
+        payments_mc = (schedule_from_rates(p.principal, rates_mc, p.grace_months).payments
+                       if rates_mc.ndim == 2 else schedule.payments)
+
         # Only relative price moves matter, so every path starts from a price of 1.
         mc = simulate_paths(ret_a_mc, ret_b_mc, div_a_mc, np.ones(n_paths), np.ones(n_paths),
-                            salary_cap=caps_mc, **common)
+                            salary_cap=caps_mc, **{**common, "payments": payments_mc})
         df_mc = pd.DataFrame({
             "Is_Ruined": mc.ruined, "Lev_Final": mc.lev_final, "DCA_Final": mc.dca_final,
             "Lev_Win": (~mc.ruined) & (mc.lev_final > mc.dca_final), "Ruin_Month": mc.ruin_month,
@@ -713,7 +831,8 @@ def run_summary(df, params):
     return EngineResults(hist=df_hist, mc=df_mc, schedule=schedule, buffer_cash=buffer_cash,
                          block_size=block, mc_ok=mc_ok, vol_drag=float(m.decay), beta_b=float(m.beta_b),
                          job_loss_any_rate=any_rate, job_loss_avg_months=avg_months,
-                         mc_dividend_yield=mc_dividend_yield,
+                         mc_dividend_yield=mc_dividend_yield, dividend_interval=m.dividend_interval,
+                         mc_final_rate_p5=rate_p5, mc_final_rate_p95=rate_p95,
                          hist_replicates=reps, modelled_b_months=m.modelled_b_months)
 
 
@@ -761,6 +880,7 @@ def run_trace(df, params, anchor_idx):
         "from_buffer": ledger["from_buffer"][:last, 0],
         "from_sell": ledger["from_sell"][:last, 0],
         "from_sell_b": ledger["from_sell_b"][:last, 0],
+        "dividend_tax": ledger["dividend_tax"][:last, 0],
         "from_salary": ledger["from_salary"][:last, 0],
         "dca_contribution": ledger["dca_contribution"][:last, 0],
         "shares_a": ledger["shares_a"][:last, 0],

@@ -38,6 +38,21 @@ SCENARIO_BY_LABEL = {
 JOB_LOSS_MODES = ["手動指定時間", "隨機失業模型"]
 JOB_LOSS_DISTS = {"對數常態": "lognormal", "卜瓦松": "poisson"}
 
+# 綜所稅級距 -> 股利的淨稅率。合併計稅時股利有 8.5% 可抵減稅額，所以淨稅率是級距減 8.5%；
+# 40% 級距改用 28% 分開計稅比較划算。
+INCOME_TAX_BRACKETS = {
+    "不計股利所得稅": 0.0,
+    "5%（可抵減額大於稅額，以 0 計）": 0.0,
+    "12%": 0.035,
+    "20%": 0.115,
+    "30%": 0.215,
+    "40%（以 28% 分開計稅）": 0.28,
+}
+NHI_RATE, NHI_THRESHOLD = 0.0211, 20_000
+
+DIVIDEND_INTERVALS = {"跟歷史一樣（自動判斷）": 0, "每月": 1, "每季": 3, "每半年": 6, "每年": 12}
+INTERVAL_NAMES = {1: "每月", 3: "每季", 6: "每半年", 12: "每年"}
+
 MC_DIVIDEND_MODES = {
     "照歷史上實際發的配息（跟報酬一起重抽）": engine.MC_DIVIDENDS_HISTORY,
     "照「未來平均一年發多少股息」的設定": engine.MC_DIVIDENDS_MODEL,
@@ -112,6 +127,25 @@ with st.sidebar:
                                     help="設定升息從第幾年發生。")
         rate_shock_delta = ui.slider("shock_d", "利率調高多少 (+%)", 0.0, 5.0, 1.0, step=0.1,
                                      help="升息的幅度。例如原本 4%、這裡填 1，升息後就變 5%。升息後每月還款會自動重新計算、變得更高。")
+
+    enable_floating = ui.checkbox("float", "浮動利率：利率每年都可能變", False,
+                                  help="多數房貸和信貸是浮動利率，會跟著央行升降息調整。打開後可以排定之後每年利率各調多少，"
+                                       "也可以讓蒙地卡羅在這條路徑之外再加上隨機的升降息。每次利率變動，月付金都會依剩餘本金和剩餘期數重算。")
+    rate_path, rate_volatility = (), 0.0
+    if enable_floating:
+        rate_path_str = ui.text("rpath", "第 2 年起，每年利率調整多少（百分點），用逗號分開", "0.25, 0.25, 0.125", clean_path, max_chars=200,
+                                help="依序是第 2 年、第 3 年、第 4 年…開始時利率的變動，正數是升息、負數是降息，會一直累加。"
+                                     "例如「0.25, 0.25, 0.125」代表第 2 年升 1 碼、第 3 年再升 1 碼、第 4 年再升半碼，之後維持不變。"
+                                     "留空代表沒有排定的調整。")
+        try:
+            rate_path = engine.parse_rate_path(rate_path_str)
+        except ValueError as exc:
+            st.error(str(exc))
+            input_errors.append(f"浮動利率路徑：{exc}")
+        rate_volatility = ui.slider("rvol", "蒙地卡羅：每年再隨機升降多少（標準差，百分點）", 0.0, 2.0, 0.25, step=0.05,
+                                    help="現實中沒有人知道未來的利率。設成 0.25 的話，蒙地卡羅的每條路徑每年會在你排定的調整之外，"
+                                         "再隨機多升或多降一些（大約三分之二的年份落在 ±0.25 個百分點以內），而且會逐年累積。設 0 就只照排定的路徑。"
+                                         "歷史滾動那一欄只用排定的路徑，不加隨機變動。")
 
     st.header("2. 投資與再配置策略")
     ticker_a = ui.text("a", "第一標的 (主資產, 如 0056.TW)", "00878.TW", clean_ticker, max_chars=20,
@@ -254,6 +288,11 @@ with st.sidebar:
                                help="預估這檔標的未來平均一年配發的股息比率。例如填 6，就是一年大約領回本金的 6%。"
                                     "這個數字用在歷史資料用完之後的「假想未來」；有真實資料的月份一律用實際發過的配息。"
                                     "蒙地卡羅預設也用實際發過的配息，可以在「進階模擬設定」改成用這裡的數字。") / 100.0
+    dividend_interval_label = ui.choice("dfreq", "未來的配息多久發一次", list(DIVIDEND_INTERVALS), list(DIVIDEND_INTERVALS)[0],
+                                        help="同樣一年發 6%，每個月發一點和每季發一大筆，對現金流的影響不一樣：沒發的月份只能靠其他來源繳貸款，"
+                                             "而且單筆金額越大，越容易超過二代健保補充保費的門檻。"
+                                             "「自動判斷」會看這檔標的最近三年實際多久配一次。這只影響用股息模型算出來的配息（假想未來那段），真實資料的月份照實際發放日。")
+    dividend_interval = DIVIDEND_INTERVALS[dividend_interval_label]
     div_beta = ui.slider("div_beta", "股息跟著市場起伏的程度", 0.0, 1.0, 0.5, step=0.1,
                          help="市場好的時候公司賺得多、發的股息通常也多；市場差時股息會縮水。這個拉桿設定股息跟市場連動的強弱：設 0 代表不管漲跌都固定發，設 1 代表跟市場連動很大。就算遇到崩盤，系統仍保證至少發出基本金額的 10%，不會完全歸零。")
 
@@ -294,6 +333,25 @@ with st.sidebar:
                                  help="勾選時，同一組設定每次算出來的蒙地卡羅結果都一樣，所以你調整參數後看到的變化，確定是參數造成的，不是運氣。"
                                       "取消勾選則每次重算都重新抽樣，可以用來感受抽樣本身會讓數字跳動多少。")
 
+    st.header("6. 稅與費用")
+    st.caption("預設用台灣現行的費率。槓桿策略和定期定額對照組都適用同一套規則。")
+    sell_tax = ui.number("stax", "賣出時的證交稅 (%)", 0.1, 0.05, min_value=0.0, max_value=1.0, format="%.2f",
+                         help="賣股票時政府收的稅，買進不用。ETF 是 0.1%，個股是 0.3%。這筆是在上面「買賣手續費」之外另外算的。") / 100.0
+    apply_nhi = ui.checkbox("nhi", "扣二代健保補充保費 (2.11%)", True,
+                            help="單次領到的股利達 2 萬元時，整筆要扣 2.11% 的補充保費。借錢買的部位大，每次配息很容易超過門檻；"
+                                 "定期定額對照組的部位小，初期通常不會被扣。")
+    bracket_label = ui.choice("itax", "你的綜合所得稅級距（決定股利要繳多少稅）", list(INCOME_TAX_BRACKETS), "12%",
+                              help="股利要併入綜合所得稅，但有 8.5% 的可抵減稅額，所以實際多繳的大約是「級距 − 8.5%」："
+                                   "12% 級距約 3.5%、20% 約 11.5%、30% 約 21.5%；40% 級距改用 28% 分開計稅比較划算。"
+                                   "5% 級距其實會退稅，這裡保守以 0 計。系統在每次領到配息時就先扣掉，不等到隔年報稅。"
+                                   "每戶可抵減稅額上限 8 萬元沒有另外計算。")
+    dividend_tax_rate = INCOME_TAX_BRACKETS[bracket_label]
+    taxable_share = ui.slider("dshare", "配息裡有多少比例算股利所得 (%)", 0, 100, 100, step=5,
+                              help="ETF 的配息常常不全是股利，還包含資本利得和收益平準金，那些部分不用繳所得稅和補充保費。"
+                                   "各檔 ETF 每次配息的組成不同，可以在投信公告的收益分配通知查到。不確定的話維持 100，等於全部都課，最保守。") / 100.0
+    loan_fee = ui.number("lfee", "貸款開辦費 (元)", 0, 1000, min_value=0,
+                         help="銀行撥款時收的一次性費用（開辦費、帳管費等），會直接從借到的錢裡扣掉，能拿去投資的錢就少這一筆。")
+
 params = engine.SimParams(
     principal=float(loan_principal), annual_rate_pct=float(loan_rate), total_months=periods,
     grace_months=grace_periods, rate_shock_year=rate_shock_year, rate_shock_delta_pct=float(rate_shock_delta),
@@ -304,6 +362,10 @@ params = engine.SimParams(
     structural_discount_pct=structural_discount, vol_drag=enable_vol_drag,
     swan_month=swan_month, swan_drop=swan_drop, mc_paths=mc_paths, block_size=block_size,
     seed=42 if use_fixed_seed else None, dca_mode=dca_mode, mc_dividends=mc_dividends,
+    rate_path_pct=tuple(rate_path), rate_volatility_pct=float(rate_volatility),
+    sell_tax=sell_tax, dividend_tax_rate=dividend_tax_rate, nhi_rate=NHI_RATE if apply_nhi else 0.0,
+    nhi_threshold=float(NHI_THRESHOLD), dividend_taxable_share=taxable_share, loan_fee=float(loan_fee),
+    dividend_interval_months=dividend_interval,
 )
 
 
@@ -383,7 +445,7 @@ else:
     if n_alerts:
         label += f"｜⚠️ {n_alerts} 項提醒"
     with st.expander(label):
-        st.caption("進場當月以該月價格買進，下個月開始繳第一期。處理方式的說明見「計算模型詳細說明」第九節。")
+        st.caption("進場當月以該月價格買進，下個月開始繳第一期。處理方式的說明見「計算模型詳細說明」第十節。")
         for symbol, feed in feeds.items():
             role = "（歷史替身）" if symbol == symbol_proxy and symbol not in (symbol_a, symbol_b) else ""
             st.caption(f"{symbol}{role}：來源價格期間 {feed.attrs['source_start']} 至 {feed.attrs['source_end']}（非成立／上市日期）。")
@@ -399,6 +461,9 @@ else:
                        f"以 {backfill['proxy']} 當時的實際漲跌與配息代替。{corr_txt}")
         elif symbol_proxy and symbol_proxy != symbol_a and not loaded["proxy_problem"]:
             st.caption(f"📎 替身 {symbol_proxy} 的歷史沒有比 {symbol_a} 更早（或中間有缺口），所以沒有用到。")
+        st.caption(f"📎 用股息模型算的配息（歷史資料用完之後的假想未來"
+                   f"{'，以及蒙地卡羅' if mc_dividends == engine.MC_DIVIDENDS_MODEL else ''}）：{INTERVAL_NAMES[result.dividend_interval]}發一次"
+                   f"{'，依這檔標的最近三年的紀錄判斷' if dividend_interval == 0 else ''}。")
         if result.modelled_b_months:
             first_real = data.index[result.modelled_b_months]
             st.caption(f"📎 {symbol_b} 在 {first_real:%Y-%m} 之前沒有資料，這 {result.modelled_b_months} 個月用「第一標的漲跌 × {result.beta_b:.2f} 倍」推估"
@@ -441,9 +506,28 @@ else:
     col2.metric("寬限期後每月應繳", f"${int(pmt_after_grace):,}")
     col3.metric("初始現金緩衝", f"${int(result.buffer_cash):,}")
 
+    if schedule.payments.max() > pmt_after_grace * 1.001:
+        peak = int(schedule.payments.argmax())
+        st.caption(f"📈 照你設定的利率變化，月付金最高會到 ${int(schedule.payments.max()):,}（第 {peak + 1} 個月，"
+                   f"當時年利率 {schedule.monthly_rates[peak] * 1200:.2f}%）。")
+
     active_flags = []
     if enable_rate_shock:
         active_flags.append(f"利率衝擊(第{rate_shock_year}年 +{rate_shock_delta}%)")
+    if enable_floating:
+        path_txt = "、".join(f"{d:+g}" for d in rate_path) if rate_path else "無排定調整"
+        vol_txt = f"，蒙地卡羅每年隨機 ±{rate_volatility:g}" if rate_volatility > 0 else ""
+        active_flags.append(f"浮動利率(第2年起每年 {path_txt} 個百分點{vol_txt})")
+    taxes = [f"證交稅{sell_tax * 100:g}%"] if sell_tax > 0 else []
+    if apply_nhi:
+        taxes.append("補充保費2.11%")
+    if dividend_tax_rate > 0:
+        taxes.append(f"股利所得稅{dividend_tax_rate * 100:g}%")
+    if loan_fee > 0:
+        taxes.append(f"開辦費${int(loan_fee):,}")
+    if taxes:
+        share_txt = f"；配息的{taxable_share * 100:.0f}%算股利所得" if taxable_share < 1 and (apply_nhi or dividend_tax_rate > 0) else ""
+        active_flags.append(f"稅費({'、'.join(taxes)}{share_txt})")
     if enable_black_swan:
         active_flags.append(f"黑天鵝(第{swan_month}月 -{int(swan_drop*100)}%)")
     if enable_dyn_haircut:
@@ -489,6 +573,8 @@ else:
             c1.caption(f"其中 {n_backfilled} 個起點用到了替身 {backfill['proxy'] if backfill else ''} 的歷史。")
         if result.hist_replicates > 1:
             c1.caption(f"🎲 已開啟隨機失業：每個起點各模擬 {result.hist_replicates} 種失業時點，上面的破產率是平均值。")
+        if rate_volatility > 0:
+            c1.caption("📈 這一欄的利率只照你排定的路徑走，不含隨機升降息。")
 
         c1.metric("槓桿擊敗 DCA 勝率 (全部起點)", f"{hist_res['Lev_Win'].mean() * 100:.1f}%")
         h_med = hist_res['Lev_Final_Survivors'].median()
@@ -504,6 +590,9 @@ else:
     c2.caption(f"全歷史 Block Bootstrap (區塊={result.block_size}月) 純統計重抽樣；{mc_dividend_note}"
                "**不套用 Scenario 劇本**（但黑天鵝/利率/動態折價情境仍生效）。"
                "它從整段歷史隨機重組未來，結果與哪個月進場無關。")
+    if rate_volatility > 0 and result.mc_ok:
+        c2.caption(f"📈 每條路徑的利率各自隨機升降：到最後一期，九成的路徑年利率落在 "
+                   f"{result.mc_final_rate_p5:.2f}% 到 {result.mc_final_rate_p95:.2f}% 之間。")
     if result.mc_ok and not mc_res.empty:
         ruin_rate = float(mc_res['Is_Ruined'].mean())
         margin = 1.96 * (ruin_rate * (1 - ruin_rate) / len(mc_res)) ** 0.5
@@ -600,6 +689,7 @@ else:
             '變賣主資產': trace['from_sell'],
             '變賣第二標的': trace['from_sell_b'],
             '本薪(自掏腰包)': trace['from_salary'],
+            '配息被扣的稅費': trace['dividend_tax'],
             'DCA 當月投入': trace['dca_contribution'],
             '主資產股數': trace['shares_a'],
             '再投入資產股數': trace['shares_b'],

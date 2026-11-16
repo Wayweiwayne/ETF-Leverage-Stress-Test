@@ -87,6 +87,215 @@ class LoanScheduleTests(unittest.TestCase):
         self.assertAlmostEqual(E.buffer_cash_for(s, 0, 3, 1_000_000), 3 * s.payments[0])
 
 
+class FloatingRateTests(unittest.TestCase):
+    def test_rate_path_changes_apply_from_the_second_year_and_accumulate(self):
+        rates = E.annual_rate_path(3.0, 60, rate_path_pct=(0.25, 0.25, -0.75))
+        np.testing.assert_allclose(rates[[0, 11, 12, 23, 24, 35, 36, 59]], [3, 3, 3.25, 3.25, 3.5, 3.5, 2.75, 2.75])
+
+    def test_rate_path_adds_to_a_one_off_shock_and_never_goes_negative(self):
+        rates = E.annual_rate_path(1.0, 48, shock_year=2, shock_delta_pct=1.0, rate_path_pct=(0.5, -5.0))
+        np.testing.assert_allclose(rates[[0, 12, 24, 47]], [1.0, 2.5, 0.0, 0.0])
+
+    def test_payment_is_reset_when_the_rate_moves_and_the_loan_still_clears(self):
+        fixed = E.build_loan_schedule(1_000_000, 3.0, 120)
+        floating = E.build_loan_schedule(1_000_000, 3.0, 120, rate_path_pct=(0.5, 0.5, 0.0, -0.25))
+        np.testing.assert_allclose(floating.payments[:12], fixed.payments[:12])
+        steps = floating.payments[[12, 24, 36, 48]] - floating.payments[[11, 23, 35, 47]]
+        self.assertTrue(steps[0] > 0 and steps[1] > 0 and abs(steps[2]) < 1e-6 and steps[3] < 0)
+        for year in range(10):                                   # level within every loan year
+            np.testing.assert_allclose(floating.payments[year * 12:(year + 1) * 12], floating.payments[year * 12])
+        self.assertAlmostEqual(floating.end_balance[-1], 0.0, places=4)
+        np.testing.assert_allclose(floating.monthly_rates[12] * 1200, 3.5)
+
+    def test_rising_rate_during_grace_raises_the_interest_only_payment(self):
+        s = E.build_loan_schedule(1_000_000, 3.0, 120, grace_months=36, rate_path_pct=(1.0,))
+        self.assertAlmostEqual(s.payments[11], 1_000_000 * 0.03 / 12)
+        self.assertAlmostEqual(s.payments[12], 1_000_000 * 0.04 / 12)
+        self.assertAlmostEqual(s.end_balance[-1], 0.0, places=4)
+
+    def test_each_path_gets_its_own_schedule(self):
+        rates = np.column_stack([np.full(60, 3.0), E.annual_rate_path(3.0, 60, rate_path_pct=(1.0, 1.0))])
+        both = E.schedule_from_rates(500_000, rates, 0)
+        np.testing.assert_allclose(both.payments[:, 0], E.build_loan_schedule(500_000, 3.0, 60).payments)
+        np.testing.assert_allclose(both.payments[:, 1],
+                                   E.build_loan_schedule(500_000, 3.0, 60, rate_path_pct=(1.0, 1.0)).payments)
+        np.testing.assert_allclose(both.end_balance[-1], 0.0, atol=1e-4)
+
+    def test_random_rate_paths_wander_around_the_set_path(self):
+        p = params(total_months=120, annual_rate_pct=3.0, rate_path_pct=(0.5,), rate_volatility_pct=0.25)
+        rates = E.monte_carlo_rate_paths(p, np.random.RandomState(0), 20_000)
+        base = E.annual_rate_path(3.0, 120, rate_path_pct=(0.5,))
+        self.assertEqual(rates.shape, (120, 20_000))
+        np.testing.assert_allclose(rates[:12], 3.0)                       # the first year's rate is the contract rate
+        self.assertTrue((rates[12:24] == rates[12]).all())                # one move per loan year
+        self.assertAlmostEqual(rates[-1].mean(), base[-1], delta=0.02)
+        self.assertAlmostEqual(rates[-1].std(), 0.25 * 9 ** 0.5, delta=0.02)   # nine yearly moves accumulate
+        self.assertGreater((rates[12] != rates[24]).mean(), 0.99)
+
+    def test_without_volatility_there_is_one_shared_path(self):
+        rates = E.monte_carlo_rate_paths(params(rate_path_pct=(0.25,)), np.random.RandomState(0), 50)
+        np.testing.assert_allclose(rates, E.annual_rate_path(3.5, 84, rate_path_pct=(0.25,)))
+
+    def test_random_rates_never_go_below_zero(self):
+        p = params(annual_rate_pct=0.5, rate_volatility_pct=2.0)
+        self.assertGreaterEqual(E.monte_carlo_rate_paths(p, np.random.RandomState(1), 2_000).min(), 0.0)
+
+    def test_rate_randomness_reaches_only_the_monte_carlo(self):
+        df = market()
+        calm = E.run_summary(df, params(salary_cap=10_000.0))
+        wild = E.run_summary(df, params(salary_cap=10_000.0, rate_volatility_pct=1.5))
+        pd.testing.assert_frame_equal(calm.hist, wild.hist)
+        self.assertFalse(calm.mc['Lev_Final'].equals(wild.mc['Lev_Final']))
+        self.assertEqual(calm.mc_final_rate_p5, calm.mc_final_rate_p95)
+        self.assertLess(wild.mc_final_rate_p5, 3.5)
+        self.assertGreater(wild.mc_final_rate_p95, 3.5)
+        pd.testing.assert_frame_equal(wild.mc, E.run_summary(df, params(salary_cap=10_000.0, rate_volatility_pct=1.5)).mc)
+
+    def test_rising_rates_cannot_make_things_safer(self):
+        df = market()
+        stressed = dict(salary_cap=8_000.0, swan_month=6, swan_drop=0.3)
+        flat = E.run_summary(df, params(**stressed))
+        rising = E.run_summary(df, params(rate_path_pct=(1.0, 1.0, 1.0), **stressed))
+        self.assertTrue((rising.hist['Ruin_Prob'] >= flat.hist['Ruin_Prob']).all())
+        self.assertGreater(rising.mc['Is_Ruined'].mean(), flat.mc['Is_Ruined'].mean())
+        self.assertGreater(rising.schedule.payments[-1], flat.schedule.payments[-1])
+
+    def test_ledger_shows_the_rate_of_each_month(self):
+        trace = E.run_trace(market(), params(salary_cap=1e9, rate_path_pct=(0.5,)), 5)
+        np.testing.assert_allclose(trace['annual_rate_pct'].iloc[[0, 11, 12, 83]], [3.5, 3.5, 4.0, 4.0])
+
+    def test_rate_path_text(self):
+        self.assertEqual(E.parse_rate_path("0.25, 0.25,-0.125"), (0.25, 0.25, -0.125))
+        self.assertEqual(E.parse_rate_path(" "), ())
+        for bad in ("up", "0.25, x", "50", "nan"):
+            with self.assertRaises(ValueError, msg=bad):
+                E.parse_rate_path(bad)
+
+
+class TaxAndFeeTests(unittest.TestCase):
+    """10,000 shares bought at 100; a 2% yield pays 20,000."""
+
+    def test_sales_pay_the_transaction_tax_on_top_of_the_fee(self):
+        res = one_path([0.0], [9_000], (E.SELL,), fee=0.002, sell_tax=0.001)
+        bought = 1_000_000 * (1 - 0.002) / 100                         # buying pays the fee only
+        self.assertAlmostEqual(res.ledger['shares_a'][0, 0], bought - 9_000 / (1 - 0.003) / 100)
+        self.assertAlmostEqual(res.lev_final[0], res.ledger['shares_a'][0, 0] * 100 * (1 - 0.003))
+
+    def test_dividend_income_tax_is_withheld_from_every_payout(self):
+        res = one_path([0.0], [0.0], (E.SALARY,), div_yield=0.02, dividend_tax_rate=0.035)
+        self.assertAlmostEqual(res.ledger['dividend_tax'][0, 0], 700)
+        self.assertAlmostEqual(res.lev_final[0], 1_000_000 + 20_000 - 700)
+
+    def test_health_levy_applies_only_from_the_threshold_up(self):
+        at = one_path([0.0], [0.0], (E.SALARY,), div_yield=0.02, nhi_rate=0.0211, nhi_threshold=20_000)
+        below = one_path([0.0], [0.0], (E.SALARY,), div_yield=0.0199, nhi_rate=0.0211, nhi_threshold=20_000)
+        self.assertAlmostEqual(at.ledger['dividend_tax'][0, 0], 20_000 * 0.0211)
+        self.assertEqual(below.ledger['dividend_tax'][0, 0], 0)
+
+    def test_only_the_dividend_income_part_of_a_payout_is_taxed(self):
+        res = one_path([0.0], [0.0], (E.SALARY,), div_yield=0.03, dividend_tax_rate=0.10, nhi_rate=0.0211,
+                       nhi_threshold=20_000, dividend_taxable_share=0.5)
+        self.assertAlmostEqual(res.ledger['dividend_tax'][0, 0], 15_000 * 0.10)   # 15,000 taxable: under the levy threshold
+
+    def test_reinvested_dividends_are_reinvested_net_of_tax(self):
+        res = one_path([0.0], [0.0], (E.SALARY,), div_yield=0.02, dividend_tax_rate=0.5, reinvest=True, ratio_b=0.0)
+        self.assertAlmostEqual(res.ledger['shares_a'][0, 0], 10_000 + 10_000 / 100)
+
+    def test_comparison_portfolio_is_taxed_on_its_own_smaller_payouts(self):
+        # It invests 4,000 a month, so its dividends stay far below the levy threshold; the leveraged side's do not.
+        kwargs = dict(returns=[0.0] * 6, payments=[10_000] * 6, order=(E.SALARY, E.SELL), salary_cap=4_000, div_yield=0.02)
+        plain = one_path(**kwargs)
+        levied = one_path(nhi_rate=0.0211, nhi_threshold=20_000, **kwargs)
+        np.testing.assert_allclose(levied.dca_final, plain.dca_final)
+        self.assertLess(levied.lev_final[0], plain.lev_final[0])
+        taxed = one_path(dividend_tax_rate=0.2, **kwargs)
+        self.assertLess(taxed.dca_final[0], plain.dca_final[0])
+
+    def test_loan_fee_comes_out_of_what_is_invested(self):
+        res = one_path([0.0], [0.0], (E.SALARY,), loan_fee=6_000, buffer_cash=100_000)
+        self.assertAlmostEqual(res.ledger['shares_a'][0, 0], (1_000_000 - 100_000 - 6_000) / 100)
+
+    def test_buffer_cannot_exceed_the_loan_less_the_fee(self):
+        res = E.run_summary(market(n=30), params(total_months=12, buffer_months=12, loan_fee=50_000.0, principal=1_000_000.0))
+        self.assertAlmostEqual(res.buffer_cash, 950_000)
+
+    def test_taxes_lower_the_outcome_for_both_strategies(self):
+        df = market()
+        free = E.run_summary(df, params())
+        taxed = E.run_summary(df, params(sell_tax=0.001, dividend_tax_rate=0.035, nhi_rate=0.0211))
+        self.assertLess(taxed.mc['Lev_Final'].median(), free.mc['Lev_Final'].median())
+        self.assertLess(taxed.mc['DCA_Final'].median(), free.mc['DCA_Final'].median())
+        self.assertGreaterEqual(taxed.mc['Is_Ruined'].mean(), free.mc['Is_Ruined'].mean())
+
+    def test_ledger_records_what_each_payout_lost(self):
+        trace = E.run_trace(market(with_b=False), params(reinvest=False, dividend_tax_rate=0.10, salary_cap=1e9,
+                                                          source_order=(E.SALARY,)), 8)
+        paying = trace['dividend_tax'] > 0
+        self.assertEqual(int(paying.sum()), 28)                         # the fixture pays every third month
+        self.assertTrue((trace.loc[~paying, 'dividend_tax'] == 0).all())
+
+
+class DividendFrequencyTests(unittest.TestCase):
+    def test_lumping_moves_the_same_cash_into_fewer_payouts(self):
+        np.testing.assert_allclose(E.lump_dividends(np.ones(7), 3), [0, 0, 3, 0, 0, 3, 0])
+        np.testing.assert_allclose(E.lump_dividends(np.ones(12), 12), [0] * 11 + [12])
+        monthly = np.arange(1.0, 7.0)
+        self.assertIs(E.lump_dividends(monthly, 1), monthly)
+
+    def test_lumping_works_across_many_paths(self):
+        out = E.lump_dividends(np.arange(12.0).reshape(6, 2), 6)
+        np.testing.assert_allclose(out[:5], 0)
+        np.testing.assert_allclose(out[5], [60, 66])
+
+    def test_frequency_is_read_from_the_latest_record(self):
+        def record(every, months=60):
+            y = np.zeros(months)
+            y[every - 1::every] = 0.01
+            return y
+        self.assertEqual([E.infer_dividend_interval(record(k)) for k in (1, 3, 6, 12)], [1, 3, 6, 12])
+        self.assertEqual(E.infer_dividend_interval(np.zeros(60)), 1)
+        switched = np.concatenate([record(12, 120), record(3, 36)])     # went quarterly three years ago
+        self.assertEqual(E.infer_dividend_interval(switched), 3)
+
+    def test_modelled_yield_pays_the_same_per_year_at_any_frequency(self):
+        flat = np.full((24, 1), 50.0)
+        totals = [E.dividend_model_yields(flat, 50.0, 0.06, 0.0, interval=k).sum() for k in (1, 3, 6, 12)]
+        np.testing.assert_allclose(totals, 0.12)
+        quarterly = E.dividend_model_yields(flat, 50.0, 0.06, 0.0, interval=3)[:, 0]
+        np.testing.assert_allclose(quarterly[:6], [0, 0, 0.015, 0, 0, 0.015])
+
+    def test_scenario_months_follow_the_chosen_frequency(self):
+        df = market(n=40)
+        for interval in (1, 3, 6, 12):
+            p = params(dividend_interval_months=interval, future_annual_returns=(0.0,))
+            m = E._prepare_market(df, p)
+            _, _, div_a, win_lens, _ = E._history_paths(m, p)
+            scenario = div_a[:, -1]                                  # entering in the latest month: all scenario
+            self.assertEqual(win_lens[-1], 0)
+            self.assertEqual(int((scenario > 0).sum()), 84 // interval)
+            self.assertAlmostEqual(scenario[:12 * (84 // 12)].sum() / 7, 0.06, places=6)
+
+    def test_automatic_frequency_matches_the_asset(self):
+        df = market()                                                # pays every third month
+        self.assertEqual(E.run_summary(df, params(dividend_interval_months=0)).dividend_interval, 3)
+        self.assertEqual(E.run_summary(df, params(dividend_interval_months=6)).dividend_interval, 6)
+        self.assertEqual(E.run_summary(df, params()).dividend_interval, 1)
+
+    def test_assumed_yield_monte_carlo_follows_the_frequency_too(self):
+        df = market()
+        p = params(mc_dividends=E.MC_DIVIDENDS_MODEL, dividend_interval_months=3)
+        _, _, div_a = E.monte_carlo_inputs(E._prepare_market(df, p), p, np.random.RandomState(0))
+        self.assertTrue((div_a[[0, 1, 3, 4]] == 0).all())
+        self.assertTrue((div_a[[2, 5]] > 0).all())
+
+    def test_bigger_payouts_cross_the_health_levy_threshold(self):
+        monthly = one_path([0.0] * 3, [0.0] * 3, (E.SALARY,), div_yield=0.015, nhi_rate=0.0211, nhi_threshold=20_000)
+        quarterly = one_path([0.0] * 3, [0.0] * 3, (E.SALARY,), div_yield=[0.0, 0.0, 0.045],
+                             nhi_rate=0.0211, nhi_threshold=20_000)
+        self.assertEqual(monthly.ledger['dividend_tax'].sum(), 0)                 # 15,000 a month stays under
+        self.assertAlmostEqual(quarterly.ledger['dividend_tax'].sum(), 45_000 * 0.0211)
+
+
 class WaterfallTests(unittest.TestCase):
     def test_sources_are_used_in_order_up_to_their_limits(self):
         res = one_path([0.0] * 3, [10_000] * 3, (E.SALARY, E.BUFFER, E.SELL), salary_cap=4_000, buffer_cash=9_000)
@@ -517,6 +726,9 @@ class ValidationTests(unittest.TestCase):
             dict(salary_cap=-1), dict(haircut_penalty=1.0), dict(swan_drop=1.5), dict(base_div_yield=-0.01),
             dict(future_annual_returns=()), dict(future_annual_returns=(5, -100)), dict(mc_paths=0),
             dict(mc_paths=10**7), dict(block_size=0), dict(dca_mode="all"), dict(source_order=("lottery",)),
+            dict(rate_path_pct=(50.0,)), dict(rate_volatility_pct=-1), dict(rate_volatility_pct=9), dict(sell_tax=1.0),
+            dict(dividend_tax_rate=1.2), dict(nhi_rate=-0.1), dict(dividend_tax_rate=0.6, nhi_rate=0.6),
+            dict(dividend_taxable_share=1.5), dict(loan_fee=-1), dict(loan_fee=5e6), dict(dividend_interval_months=4),
             dict(job_loss=E.JobLossParams(mode="sometimes")),
             dict(job_loss=E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=1.2)),
             dict(job_loss=E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=0.1, mean_duration=0)),
