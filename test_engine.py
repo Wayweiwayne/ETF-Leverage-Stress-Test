@@ -87,6 +87,81 @@ class LoanScheduleTests(unittest.TestCase):
         self.assertAlmostEqual(E.buffer_cash_for(s, 0, 3, 1_000_000), 3 * s.payments[0])
 
 
+class ReturnAndRangeTests(unittest.TestCase):
+    def test_irr_recovers_a_known_rate(self):
+        monthly = 1.01                                              # 1% a month
+        paid = np.full((24, 1), 1_000.0)
+        final = (1_000.0 * monthly ** np.arange(23, -1, -1)).sum()   # each payment grows until the end
+        self.assertAlmostEqual(E.annual_irr(paid, np.array([final]))[0], monthly ** 12 - 1, places=6)
+
+    def test_irr_handles_the_edge_cases(self):
+        paid = np.column_stack([np.full(12, 100.0), np.full(12, 100.0), np.zeros(12), np.full(12, 100.0)])
+        out = E.annual_irr(paid, np.array([1_200.0, 0.0, 500.0, 600.0]))
+        self.assertAlmostEqual(out[0], 0.0, places=6)               # got back exactly what went in
+        self.assertEqual(out[1], -1.0)                              # nothing left
+        self.assertTrue(np.isnan(out[2]))                           # nothing paid in
+        self.assertLess(out[3], -0.5)                               # half lost within a year
+
+    def test_irr_ranks_paths_like_their_outcomes(self):
+        paid = np.full((36, 3), 1_000.0)
+        out = E.annual_irr(paid, np.array([30_000.0, 36_000.0, 45_000.0]))
+        self.assertTrue(out[0] < 0 < out[2])
+        self.assertAlmostEqual(out[1], 0.0, places=6)
+
+    def test_out_of_pocket_totals_are_tracked_for_both_strategies(self):
+        res = one_path([0.0] * 5, [10_000] * 5, (E.SALARY, E.SELL), salary_cap=4_000)
+        self.assertAlmostEqual(res.out_of_pocket[0], 20_000)
+        self.assertAlmostEqual(res.dca_invested[0], 20_000)
+        full = one_path([0.0] * 5, [10_000] * 5, (E.SALARY, E.SELL), salary_cap=4_000, dca_mode=E.DCA_FULL_PAYMENT)
+        self.assertAlmostEqual(full.dca_invested[0], 50_000)
+
+    def test_monthly_quantiles_and_flows_are_returned_on_request(self):
+        months, n = 6, 5
+        ret = np.tile(np.array([-0.5, -0.1, 0.0, 0.1, 0.5]), (months, 1)) * (np.arange(months)[:, None] == 0)
+        res = E.simulate_paths(ret, np.zeros((months, n)), np.zeros((months, n)), np.full(n, 100.0), np.ones(n),
+                               np.full(months, 1_000.0), principal=1_000_000.0, buffer_cash=0.0, fee=0.0,
+                               reinvest=False, ratio_b=0.0, order=(E.SALARY,), salary_cap=np.full((months, n), 1_000.0),
+                               quantiles=(0.0, 0.5, 1.0), keep_flows=True)
+        np.testing.assert_allclose(res.value_quantiles["lev"][0], [500_000, 1_000_000, 1_500_000])
+        np.testing.assert_allclose(res.value_quantiles["alive"], 1.0)
+        self.assertEqual(res.flows["salary"].shape, (months, n))
+        np.testing.assert_allclose(res.flows["salary"], 1_000.0)
+        plain = one_path([0.0], [0.0], (E.SALARY,))
+        self.assertIsNone(plain.value_quantiles)
+        self.assertIsNone(plain.flows)
+
+    def test_ruined_paths_count_as_zero_in_the_range(self):
+        ret = np.zeros((3, 4))
+        caps = np.tile(np.array([0.0, 0.0, 5_000.0, 5_000.0]), (3, 1))      # two paths cannot pay at all
+        res = E.simulate_paths(ret, ret, ret, np.full(4, 100.0), np.ones(4), np.full(3, 1_000.0),
+                               principal=1_000_000.0, buffer_cash=0.0, fee=0.0, reinvest=False, ratio_b=0.0,
+                               order=(E.SALARY,), salary_cap=caps, quantiles=(0.0, 1.0))
+        np.testing.assert_allclose(res.value_quantiles["lev"][:, 0], 0.0)
+        np.testing.assert_allclose(res.value_quantiles["lev"][:, 1], 1_000_000)
+        np.testing.assert_allclose(res.value_quantiles["alive"], 0.5)
+
+    def test_summary_carries_the_range_and_the_returns(self):
+        res = E.run_summary(market(), params(salary_cap=8_000.0, swan_month=6, swan_drop=0.3))
+        fan, mc = res.mc_fan, res.mc
+        self.assertEqual(len(fan), 84)
+        self.assertEqual(fan['month'].tolist(), list(range(1, 85)))
+        ordered = fan[['lev_p5', 'lev_p25', 'lev_p50', 'lev_p75', 'lev_p95']].to_numpy()
+        self.assertTrue((np.diff(ordered, axis=1) >= 0).all())
+        np.testing.assert_allclose(fan['loan_balance'], res.schedule.end_balance)
+        self.assertAlmostEqual(fan['alive'].iloc[-1], 1 - mc['Is_Ruined'].mean())
+        self.assertAlmostEqual(fan['lev_p50'].iloc[-1], mc['Lev_Final'].median(), delta=1.0)
+        self.assertTrue((np.diff(fan['alive']) <= 1e-12).all())            # ruin is permanent
+        self.assertTrue((mc['Out_Of_Pocket'] <= 8_000.0 * 84 + 1e-6).all())
+        self.assertTrue((mc.loc[mc['Is_Ruined'] & (mc['Out_Of_Pocket'] > 0), 'Lev_IRR'] == -1.0).all())
+        survivors = mc[~mc['Is_Ruined']]
+        self.assertGreater(np.corrcoef(survivors['Lev_Final'], survivors['Lev_IRR'])[0, 1], 0.5)
+
+    def test_no_range_without_a_monte_carlo(self):
+        res = E.run_summary(market(n=1), params(total_months=12))
+        self.assertIsNone(res.mc_fan)
+        self.assertIn('Lev_IRR', res.mc.columns)
+
+
 class FloatingRateTests(unittest.TestCase):
     def test_rate_path_changes_apply_from_the_second_year_and_accumulate(self):
         rates = E.annual_rate_path(3.0, 60, rate_path_pct=(0.25, 0.25, -0.75))

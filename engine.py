@@ -122,7 +122,11 @@ class PathResults:
     lev_final: np.ndarray
     dca_final: np.ndarray
     ruin_month: np.ndarray      # month in which the payment was missed, 0 if never
+    out_of_pocket: np.ndarray   # salary paid in over the whole term
+    dca_invested: np.ndarray    # what the comparison portfolio put in
     ledger: dict | None = None  # per-month arrays of shape (months, paths) when record=True
+    value_quantiles: dict | None = None  # per-month quantiles across paths when `quantiles` is given
+    flows: dict | None = None   # per-month salary and comparison contributions when keep_flows=True
 
 
 @dataclass
@@ -144,6 +148,7 @@ class EngineResults:
     hist_replicates: int        # unemployment draws per entry month (1 unless job loss is random)
     modelled_b_months: int      # historical months in which the second asset had to be modelled
     trace: pd.DataFrame | None = None  # month-by-month ledger of one entry month
+    mc_fan: pd.DataFrame | None = None  # per-month range of net worth across the Monte Carlo paths
 
 
 @dataclass
@@ -294,7 +299,8 @@ def _unique_order(order):
 def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, principal, buffer_cash,
                    fee, reinvest, ratio_b, order, salary_cap, haircut_trigger=1.0, haircut_penalty=0.0,
                    dca_mode=DCA_MATCH_OUT_OF_POCKET, record=False, sell_tax=0.0, dividend_tax_rate=0.0,
-                   nhi_rate=0.0, nhi_threshold=0.0, dividend_taxable_share=1.0, loan_fee=0.0):
+                   nhi_rate=0.0, nhi_threshold=0.0, dividend_taxable_share=1.0, loan_fee=0.0,
+                   quantiles=None, keep_flows=False):
     """Run the leveraged strategy and its no-loan comparison over every path at once.
 
     Return/yield matrices are (months, paths); `salary_cap` has the same shape. A month's
@@ -307,7 +313,9 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     pays `fee` plus `sell_tax`. Each dividend payout loses `dividend_tax_rate` of its taxable share,
     plus `nhi_rate` of it when that share reaches `nhi_threshold`; the comparison portfolio is taxed
     by the same rules on its own, smaller payouts. With `record=True` the per-month ledger is
-    returned as well.
+    returned as well. `quantiles` asks for those quantiles of net worth across paths in every
+    month (a ruined path counts as zero), and `keep_flows` for each month's salary payment and
+    comparison contribution per path.
     """
     if dca_mode not in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT):
         raise ValueError(f"未知的 DCA 對照模式：{dca_mode}")
@@ -323,6 +331,10 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     buf_vals = np.full(n_paths, float(buffer_cash))
     is_ruined = np.zeros(n_paths, dtype=bool)
     ruin_month = np.zeros(n_paths, dtype=int)
+    out_of_pocket = np.zeros(n_paths)
+    dca_invested = np.zeros(n_paths)
+    spread = {"lev": [], "dca": [], "alive": []} if quantiles is not None else None
+    flows = {"salary": [], "dca": []} if keep_flows else None
 
     dca_shares_a = np.zeros(n_paths)
     dca_shares_b = np.zeros(n_paths)
@@ -400,6 +412,8 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
             contribution = np.where(is_ruined, np.minimum(pmt, np.maximum(salary_cap[i, :], 0.0)), used[SALARY])
         is_ruined = is_ruined | defaulted
         ruin_month[defaulted] = i + 1
+        out_of_pocket = out_of_pocket + used[SALARY]
+        dca_invested = dca_invested + contribution
 
         dca_gross = dca_shares_a * div_per_share
         dca_divs = dca_gross - dividend_levy(dca_gross)
@@ -414,6 +428,13 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
                     prices_a > 0, ((contribution + dca_div_pools) * (1 - fee)) / prices_a, 0.0)
                 dca_div_pools = np.zeros(n_paths)
 
+        if spread is not None:
+            spread["lev"].append(np.quantile(np.where(is_ruined, 0.0, lev_value()), quantiles))
+            spread["dca"].append(np.quantile(dca_value(), quantiles))
+            spread["alive"].append(1.0 - is_ruined.mean())
+        if keep_flows:
+            flows["salary"].append(used[SALARY])
+            flows["dca"].append(contribution)
         if record:
             ledger["from_dividend"].append(used[DIVIDEND])
             ledger["from_buffer"].append(used[BUFFER])
@@ -432,7 +453,37 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     lev_final[is_ruined] = 0
     if record:
         ledger = {k: np.array(v) for k, v in ledger.items()}
-    return PathResults(is_ruined, lev_final, dca_value(), ruin_month, ledger)
+    if spread is not None:
+        spread = {k: np.array(v) for k, v in spread.items()}
+    if keep_flows:
+        flows = {k: np.array(v) for k, v in flows.items()}
+    return PathResults(is_ruined, lev_final, dca_value(), ruin_month, out_of_pocket, dca_invested,
+                       ledger, spread, flows)
+
+
+def annual_irr(paid_in, final_value, iterations=40):
+    """Money-weighted annual return for every path.
+
+    `paid_in` (months, paths) is what went in at the end of each month and `final_value` what
+    was there at the end of the last one. The result is the constant yearly return that turns
+    the former into the latter: NaN where nothing was paid in, -1 where nothing was left.
+    """
+    paid_in = np.asarray(paid_in, dtype=float)
+    final_value = np.asarray(final_value, dtype=float)
+    months, n_paths = paid_in.shape
+    t = np.arange(1, months + 1)[:, None]
+    lo, hi = np.full(n_paths, -0.99), np.full(n_paths, 1.0)       # monthly rate
+    for _ in range(iterations):
+        mid = (lo + hi) / 2
+        log_growth = np.log1p(mid)
+        npv = final_value * np.exp(-months * log_growth) - (paid_in * np.exp(-t * log_growth[None, :])).sum(axis=0)
+        lo, hi = np.where(npv > 0, mid, lo), np.where(npv > 0, hi, mid)
+    annual = (1 + (lo + hi) / 2) ** 12 - 1
+    annual = np.where(final_value <= 0, -1.0, annual)
+    return np.where(paid_in.sum(axis=0) <= 0, np.nan, annual)
+
+
+FAN_QUANTILES = (0.05, 0.25, 0.50, 0.75, 0.95)
 
 
 def lump_dividends(monthly_amounts, interval):
@@ -820,20 +871,32 @@ def run_summary(df, params):
 
         # Only relative price moves matter, so every path starts from a price of 1.
         mc = simulate_paths(ret_a_mc, ret_b_mc, div_a_mc, np.ones(n_paths), np.ones(n_paths),
-                            salary_cap=caps_mc, **{**common, "payments": payments_mc})
+                            salary_cap=caps_mc, quantiles=FAN_QUANTILES, keep_flows=True,
+                            **{**common, "payments": payments_mc})
         df_mc = pd.DataFrame({
             "Is_Ruined": mc.ruined, "Lev_Final": mc.lev_final, "DCA_Final": mc.dca_final,
             "Lev_Win": (~mc.ruined) & (mc.lev_final > mc.dca_final), "Ruin_Month": mc.ruin_month,
+            "Out_Of_Pocket": mc.out_of_pocket, "DCA_Invested": mc.dca_invested,
+            "Lev_IRR": annual_irr(mc.flows["salary"], mc.lev_final),
+            "DCA_IRR": annual_irr(mc.flows["dca"], mc.dca_final),
         })
+        names = [f"p{round(q * 100)}" for q in FAN_QUANTILES]
+        mc_fan = pd.DataFrame(mc.value_quantiles["lev"], columns=[f"lev_{n}" for n in names])
+        mc_fan[[f"dca_{n}" for n in names]] = mc.value_quantiles["dca"]
+        mc_fan.insert(0, "month", np.arange(1, months + 1))
+        mc_fan["alive"] = mc.value_quantiles["alive"]
+        mc_fan["loan_balance"] = schedule.end_balance
     else:
-        df_mc = pd.DataFrame(columns=["Is_Ruined", "Lev_Final", "DCA_Final", "Lev_Win", "Ruin_Month"])
+        df_mc = pd.DataFrame(columns=["Is_Ruined", "Lev_Final", "DCA_Final", "Lev_Win", "Ruin_Month",
+                                      "Out_Of_Pocket", "DCA_Invested", "Lev_IRR", "DCA_IRR"])
+        mc_fan = None
 
     return EngineResults(hist=df_hist, mc=df_mc, schedule=schedule, buffer_cash=buffer_cash,
                          block_size=block, mc_ok=mc_ok, vol_drag=float(m.decay), beta_b=float(m.beta_b),
                          job_loss_any_rate=any_rate, job_loss_avg_months=avg_months,
                          mc_dividend_yield=mc_dividend_yield, dividend_interval=m.dividend_interval,
                          mc_final_rate_p5=rate_p5, mc_final_rate_p95=rate_p95,
-                         hist_replicates=reps, modelled_b_months=m.modelled_b_months)
+                         hist_replicates=reps, modelled_b_months=m.modelled_b_months, mc_fan=mc_fan)
 
 
 def run_trace(df, params, anchor_idx):

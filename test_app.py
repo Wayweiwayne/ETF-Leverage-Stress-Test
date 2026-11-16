@@ -290,6 +290,23 @@ class AppTests(unittest.TestCase):
         self.assertIn("次破產的模擬裡，有一半發生在第", self.texts(risky.caption))
         self.assertNotIn("次破產的模擬裡", self.texts(self.start().caption))
 
+    def test_out_of_pocket_and_annual_return_table(self):
+        at = self.start(seed="1")
+        table = at.table[1].value
+        self.assertEqual(list(table.columns), ["槓桿策略", "定期定額對照組"])
+        self.assertEqual(table.index[0], "整段期間自掏腰包的總額（中位數）")
+        self.assertEqual(table.iloc[0, 0], "$2,100,000")                # 25,000 a month for 84 months
+        self.assertEqual(table.iloc[0, 1], "$2,100,000")                # the comparison puts in the same
+        self.assertRegex(table.iloc[2, 0], r"^[+-]\d+\.\d%$")
+
+        nothing_paid = self.start(seed="1", p1="3", p2="4", p3="4", p4="4", p5="4")    # sell assets only
+        self.assertEqual(nothing_paid.table[1].value.iloc[2, 0], "不適用")
+
+    def test_range_over_time_is_explained(self):
+        self.assertIn("色帶是槓桿策略手上資產的總值", self.texts(self.start().caption))
+        risky = self.start(salary="0", swan="1", swan_m="6", swan_d="40")
+        self.assertIn("資產已經不夠還清貸款", self.texts(risky.caption))
+
     def test_dividend_assumption_is_checked_against_the_record(self):
         self.assertNotIn("未來平均一年發多少股息", self.texts(self.start().warning))       # fixture pays about 6%
         self.assertIn("實際平均約", self.texts(self.start(div="12").warning))

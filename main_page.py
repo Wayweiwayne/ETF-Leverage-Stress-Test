@@ -3,6 +3,7 @@ from urllib.parse import urlencode
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 import engine
@@ -75,6 +76,33 @@ def clean_path(raw):
     if not _PATH_RE.fullmatch(raw):
         raise ValueError(raw)
     return raw
+
+
+def money(value):
+    return "不適用" if pd.isna(value) else f"${int(value):,}"
+
+
+def percent(value):
+    return "不適用" if pd.isna(value) else f"{value * 100:+.1f}%"
+
+
+def fan_chart(fan):
+    """Range of the leveraged strategy's assets over time, with the comparison portfolio and the loan."""
+    fig = go.Figure()
+    x = fan['month']
+    for low, high, shade, name in (('lev_p5', 'lev_p95', 'rgba(52,152,219,0.15)', '槓桿：九成的結果落在這裡'),
+                                   ('lev_p25', 'lev_p75', 'rgba(52,152,219,0.35)', '槓桿：一半的結果落在這裡')):
+        fig.add_trace(go.Scatter(x=x, y=fan[low], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x, y=fan[high], mode='lines', line=dict(width=0), fill='tonexty',
+                                 fillcolor=shade, name=name, hoverinfo='skip'))
+    fig.add_trace(go.Scatter(x=x, y=fan['lev_p50'], mode='lines', line=dict(color='#3498DB', width=2), name='槓桿：中位數'))
+    fig.add_trace(go.Scatter(x=x, y=fan['dca_p50'], mode='lines', line=dict(color='#9B59B6', width=2, dash='dash'),
+                             name='定期定額：中位數'))
+    fig.add_trace(go.Scatter(x=x, y=fan['loan_balance'], mode='lines', line=dict(color='#F39C12', width=2, dash='dot'),
+                             name='貸款剩餘餘額'))
+    fig.update_layout(xaxis_title='進場後第幾個月', yaxis_title='金額 (元)', hovermode='x unified',
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0))
+    return fig
 
 
 def reset_loan_defaults():
@@ -633,6 +661,29 @@ else:
         }, index=names))
         st.caption("每一列是「有這麼多比例的模擬結果比這個數字差」。例如「最差的 5%」那列，代表 20 次裡有 1 次會落在這個金額以下。")
 
+        st.markdown("##### 蒙地卡羅：自己掏了多少錢、換到多少報酬")
+        st.table(pd.DataFrame({
+            "槓桿策略": [money(mc_res['Out_Of_Pocket'].median()), money(mc_res['Lev_Final'].median()),
+                         percent(mc_res['Lev_IRR'].median()), percent(mc_res['Lev_IRR'].quantile(0.05))],
+            "定期定額對照組": [money(mc_res['DCA_Invested'].median()), money(mc_res['DCA_Final'].median()),
+                               percent(mc_res['DCA_IRR'].median()), percent(mc_res['DCA_IRR'].quantile(0.05))],
+        }, index=["整段期間自掏腰包的總額（中位數）", "期滿淨值（中位數，破產以 0 計）",
+                  "換算成年化報酬率（中位數）", "換算成年化報酬率（最差的 5%）"]))
+        st.caption("年化報酬率是把「每個月從薪水掏出的錢」和「期滿時手上的錢」換算成等值的每年報酬，方便和定存或其他投資比較。"
+                   "破產的路徑算 -100%；整段期間完全沒有自掏的路徑無法計算，不列入。")
+
+        st.markdown("##### 蒙地卡羅：資產隨時間的可能範圍")
+        st.plotly_chart(fan_chart(result.mc_fan), width='stretch')
+        gap = result.mc_fan['lev_p5'] - result.mc_fan['loan_balance']
+        if (gap < 0).any():
+            worst = int(gap.idxmin())
+            st.caption(f"色帶是槓桿策略手上資產的總值（還沒扣掉貸款），破產的路徑以 0 計。"
+                       f"色帶下緣跌到貸款餘額線以下的月份，代表最差的 5% 情況裡資產已經不夠還清貸款；"
+                       f"差距最大在第 {int(result.mc_fan['month'].iloc[worst])} 個月。")
+        else:
+            st.caption("色帶是槓桿策略手上資產的總值（還沒扣掉貸款），破產的路徑以 0 計。"
+                       "整段期間即使是最差的 5% 情況，資產都還高於貸款餘額。")
+
         ruined_paths = mc_res[mc_res['Is_Ruined']]
         if not ruined_paths.empty:
             st.markdown("##### 蒙地卡羅：破產發生在進場後第幾個月")
@@ -650,7 +701,9 @@ else:
         'DCA_Final': 'DCA期滿淨值', 'Lev_Win': '槓桿勝過DCA的機率'})
     export_hist['進場月份'] = export_hist['進場月份'].dt.strftime('%Y-%m')
     export_mc = mc_res.rename(columns={'Is_Ruined': '破產', 'Lev_Final': '槓桿期滿淨值', 'DCA_Final': 'DCA期滿淨值',
-                                       'Lev_Win': '槓桿勝過DCA', 'Ruin_Month': '破產月份(0=未破產)'})
+                                       'Lev_Win': '槓桿勝過DCA', 'Ruin_Month': '破產月份(0=未破產)',
+                                       'Out_Of_Pocket': '槓桿自掏總額', 'DCA_Invested': 'DCA投入總額',
+                                       'Lev_IRR': '槓桿年化報酬率', 'DCA_IRR': 'DCA年化報酬率'})
     d1, d2 = st.columns(2)
     d1.download_button("📥 下載歷史滾動結果 (CSV)", data=export_hist.to_csv(index=False).encode('utf-8-sig'),
                        file_name="history_results.csv", mime="text/csv", key="dl_hist")
