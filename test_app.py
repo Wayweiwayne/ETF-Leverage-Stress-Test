@@ -317,6 +317,62 @@ class AppTests(unittest.TestCase):
         self.assertIn("蒙地卡羅和歷史資料用完之後的未來情境，配息是照你設的數字算的",
                       self.texts(self.start(div="12", mcdiv="1").warning))
 
+    def flags(self, at):
+        return next((c.value for c in at.caption if c.value.startswith("🟢 已啟用情境")), "")
+
+    def ledger_tax(self, at):
+        return at.dataframe[0].value['配息被扣的稅費'].sum()
+
+    def test_taiwan_taxes_apply_by_default_and_can_be_switched_off(self):
+        default = self.start(seed="1")
+        self.assertIn("稅費(證交稅0.1%、補充保費2.11%、股利所得稅3.5%)", self.flags(default))
+        self.assertGreater(self.ledger_tax(default), 0)
+
+        untaxed = self.start(seed="1", stax="0", nhi="0", itax="0")
+        self.assertNotIn("稅費", self.flags(untaxed))
+        self.assertEqual(self.ledger_tax(untaxed), 0)
+        median = lambda at: int(self.metric(at, "DCA 定期定額 期滿中位數").replace("$", "").replace(",", ""))
+        self.assertGreater(median(untaxed), median(default))
+
+    def test_tax_bracket_sets_the_dividend_tax(self):
+        self.assertIn("股利所得稅28%", self.flags(self.start(itax="5")))
+        low = self.flags(self.start(itax="1"))
+        self.assertNotIn("股利所得稅", low)
+        self.assertIn("補充保費2.11%", low)
+        self.assertIn("配息的40%算股利所得", self.flags(self.start(dshare="40")))
+        self.assertIn("開辦費$6,000", self.flags(self.start(lfee="6000")))
+        self.assertEqual(self.start(itax="99").selectbox(key="itax").value, "12%")       # nonsense in a link
+
+    def test_floating_rate_path_and_random_moves(self):
+        fixed = self.start()
+        self.assertNotIn("浮動利率", self.flags(fixed))
+        self.assertNotIn("月付金最高會到", self.texts(fixed.caption))
+
+        floating = self.start(**{"float": "1"})
+        self.assertIn("浮動利率(第2年起每年 +0.25、+0.25、+0.125 個百分點，蒙地卡羅每年隨機 ±0.25)", self.flags(floating))
+        self.assertIn("月付金最高會到", self.texts(floating.caption))
+        self.assertIn("九成的路徑年利率落在", self.texts(floating.caption))
+        self.assertIn("不含隨機升降息", self.texts(floating.caption))
+        self.assertEqual(self.metric(floating, "初期每月應繳"), self.metric(fixed, "初期每月應繳"))
+        rates = floating.dataframe[0].value['當期年利率(%)']
+        np.testing.assert_allclose(rates.iloc[[0, 12, 24, 36, 83]], [3.5, 3.75, 4.0, 4.125, 4.125])
+
+        steady = self.start(**{"float": "1", "rvol": "0", "rpath": "-0.5"})
+        self.assertNotIn("九成的路徑年利率落在", self.texts(steady.caption))
+        self.assertNotIn("月付金最高會到", self.texts(steady.caption))               # a cut never raises the payment
+
+    def test_invalid_rate_path_is_reported(self):
+        at = self.start(**{"float": "1"})
+        self.ok(at.text_input(key="rpath").set_value("0.25, up").run())
+        self.assertTrue(any("浮動利率路徑" in e.value for e in at.error))
+        self.assertEqual(len(at.metric), 0)
+
+    def test_dividend_frequency_follows_the_record_unless_chosen(self):
+        self.assertIn("每季發一次，依這檔標的最近三年的紀錄判斷", self.texts(self.start().caption))
+        yearly = self.texts(self.start(dfreq="4").caption)
+        self.assertIn("每年發一次。", yearly)
+        self.assertNotIn("依這檔標的最近三年的紀錄判斷", yearly)
+
     def test_empty_dividend_pool_is_pointed_out_when_dividends_are_reinvested(self):
         self.assertIn("配息資金池不會有錢", self.texts(self.start().sidebar.caption))
         self.assertNotIn("配息資金池不會有錢", self.texts(self.start(reinv="0").sidebar.caption))
