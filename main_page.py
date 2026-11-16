@@ -38,6 +38,11 @@ SCENARIO_BY_LABEL = {
 JOB_LOSS_MODES = ["手動指定時間", "隨機失業模型"]
 JOB_LOSS_DISTS = {"對數常態": "lognormal", "卜瓦松": "poisson"}
 
+MC_DIVIDEND_MODES = {
+    "照歷史上實際發的配息（跟報酬一起重抽）": engine.MC_DIVIDENDS_HISTORY,
+    "照「未來平均一年發多少股息」的設定": engine.MC_DIVIDENDS_MODEL,
+}
+
 DCA_MODES = {
     "與槓桿組相同的自掏金額 (公平比較)": engine.DCA_MATCH_OUT_OF_POCKET,
     "每月投入整筆應繳金額 (舊版算法)": engine.DCA_FULL_PAYMENT,
@@ -246,7 +251,9 @@ with st.sidebar:
 
     st.markdown("##### 💧 股息會跟著市場起伏")
     base_div_yield = ui.slider("div", "未來平均一年發多少股息 (%)", 0.0, 15.0, 6.0, step=0.1,
-                               help="預估這檔標的未來平均一年配發的股息比率。例如填 6，就是一年大約領回本金的 6%。") / 100.0
+                               help="預估這檔標的未來平均一年配發的股息比率。例如填 6，就是一年大約領回本金的 6%。"
+                                    "這個數字用在歷史資料用完之後的「假想未來」；有真實資料的月份一律用實際發過的配息。"
+                                    "蒙地卡羅預設也用實際發過的配息，可以在「進階模擬設定」改成用這裡的數字。") / 100.0
     div_beta = ui.slider("div_beta", "股息跟著市場起伏的程度", 0.0, 1.0, 0.5, step=0.1,
                          help="市場好的時候公司賺得多、發的股息通常也多；市場差時股息會縮水。這個拉桿設定股息跟市場連動的強弱：設 0 代表不管漲跌都固定發，設 1 代表跟市場連動很大。就算遇到崩盤，系統仍保證至少發出基本金額的 10%，不會完全歸零。")
 
@@ -272,6 +279,13 @@ with st.sidebar:
                                "舊版算法＝對照組每月投入整筆應繳金額，不受薪水上限限制；當應繳金額遠高於薪水上限時，對照組投入的本金會比槓桿組多很多。")
     dca_mode = DCA_MODES[dca_label]
 
+    mc_div_label = ui.choice("mcdiv", "蒙地卡羅的配息怎麼算", list(MC_DIVIDEND_MODES), list(MC_DIVIDEND_MODES)[0],
+                             help="蒙地卡羅是把歷史上的月份重新排列組合。"
+                                  "預設是抽到哪個月的漲跌，就一併用那個月實際發的配息，所以不配息的標的不會憑空多出配息，配息多寡也跟著這檔標的自己的紀錄走。"
+                                  "如果你認為未來的配息水準會跟過去不同，可以改成照「假想未來情境」裡設定的股息率來算。"
+                                  "不管選哪一個，歷史資料用完之後的「假想未來」都是照你設定的股息率。")
+    mc_dividends = MC_DIVIDEND_MODES[mc_div_label]
+
     mc_paths = ui.choice("paths", "模擬要跑幾種可能 (次數)", [2000, 5000, 10000], 2000,
                          help="蒙地卡羅模擬會隨機產生很多種可能的未來來統計成敗機率。跑越多次結果越穩定，但計算時間也越久。")
     block_size = ui.choice("block", "模擬時每次抽幾個月一組 (月)", [6, 12, 24], 12,
@@ -289,7 +303,7 @@ params = engine.SimParams(
     future_annual_returns=tuple(future_annual_returns), base_div_yield=base_div_yield, div_beta=div_beta,
     structural_discount_pct=structural_discount, vol_drag=enable_vol_drag,
     swan_month=swan_month, swan_drop=swan_drop, mc_paths=mc_paths, block_size=block_size,
-    seed=42 if use_fixed_seed else None, dca_mode=dca_mode,
+    seed=42 if use_fixed_seed else None, dca_mode=dca_mode, mc_dividends=mc_dividends,
 )
 
 
@@ -406,12 +420,14 @@ else:
         st.warning(f"⚠️ 替身 {symbol_proxy} 的資料無法使用，改為只用 {symbol_a} 自己的歷史。原因：{loaded['proxy_problem']}")
     own_yield = feeds[symbol_a]['Div_Yield']
     recent_yield = float(own_yield.tail(60).mean() * 12)
+    uses_assumed_yield = ("蒙地卡羅和歷史資料用完之後的未來情境" if mc_dividends == engine.MC_DIVIDENDS_MODEL
+                          else "歷史資料用完之後的未來情境")
     if own_yield.sum() == 0 and base_div_yield > 0:
         st.warning(f"⚠️ {symbol_a} 的歷史資料裡沒有任何配息，但「未來平均一年發多少股息」設為 {base_div_yield * 100:.1f}%。"
-                   "蒙地卡羅和未來情境的配息是照這個數字算的，等於憑空多出一筆現金；如果它真的不配息，請把這個拉桿調到 0。")
+                   f"{uses_assumed_yield}，配息是照這個數字算的，等於憑空多出一筆現金；如果它真的不配息，請把這個拉桿調到 0。")
     elif recent_yield > 0 and not 2 / 3 <= base_div_yield / recent_yield <= 1.5:
         st.warning(f"⚠️ 「未來平均一年發多少股息」設為 {base_div_yield * 100:.1f}%，但 {symbol_a} 最近 {min(60, len(own_yield))} 個月實際平均約 {recent_yield * 100:.1f}%"
-                   f"（全部歷史平均 {float(own_yield.mean() * 12) * 100:.1f}%）。蒙地卡羅和未來情境的配息是照你設的數字算的，"
+                   f"（全部歷史平均 {float(own_yield.mean() * 12) * 100:.1f}%）。{uses_assumed_yield}，配息是照你設的數字算的，"
                    "差距這麼大會直接影響結果，請確認這是你想測試的假設。")
     if n_months < SHORT_HISTORY_MONTHS:
         hint = ("可以在側欄「上市前的歷史用哪一檔代替」填一檔性質相近、上市更久的標的（例如 0056.TW 或 0050.TW）。"
@@ -481,7 +497,11 @@ else:
         c1.metric("DCA 定期定額 期滿中位數", f"${int(hist_res['DCA_Final'].median()):,}")
 
     c2.markdown(f"#### 【理論】蒙地卡羅宇宙 ({mc_paths}次)")
-    c2.caption(f"全歷史 Block Bootstrap (區塊={result.block_size}月) 純統計重抽樣；配息由 Dividend Beta 模型驅動。"
+    if mc_dividends == engine.MC_DIVIDENDS_HISTORY:
+        mc_dividend_note = f"配息跟著報酬一起從歷史重抽，是當時實際發的金額，平均一年約 {result.mc_dividend_yield * 100:.1f}%。"
+    else:
+        mc_dividend_note = f"配息照你設定的「未來平均股息」計算，平均一年約 {result.mc_dividend_yield * 100:.1f}%。"
+    c2.caption(f"全歷史 Block Bootstrap (區塊={result.block_size}月) 純統計重抽樣；{mc_dividend_note}"
                "**不套用 Scenario 劇本**（但黑天鵝/利率/動態折價情境仍生效）。"
                "它從整段歷史隨機重組未來，結果與哪個月進場無關。")
     if result.mc_ok and not mc_res.empty:

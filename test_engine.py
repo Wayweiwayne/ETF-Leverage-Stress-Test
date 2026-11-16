@@ -455,6 +455,55 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(E.bootstrap_indices(np.random.RandomState(3), 30, 24, 10, 5).shape, (10, 5))
 
 
+class MonteCarloDividendTests(unittest.TestCase):
+    def inputs(self, df, **overrides):
+        p = params(**overrides)
+        m = E._prepare_market(df, p)
+        return m, E.monte_carlo_inputs(m, p, np.random.RandomState(0))
+
+    def test_each_resampled_month_keeps_its_own_dividend(self):
+        df = market(with_b=False)
+        df['Div_Yield_A'] = np.linspace(0.001, 0.02, len(df))        # every month identifiable by its payout
+        m, (ret_a, _, div_a) = self.inputs(df, reinvest=False)
+        recorded = {round(r, 12): d for r, d in zip(m.ret_a, m.div_a)}
+        expected = np.vectorize(lambda r: recorded[round(r, 12)])(ret_a)
+        np.testing.assert_allclose(div_a, expected)
+        self.assertEqual(div_a.shape, (84, 200))
+
+    def test_default_is_the_recorded_dividend_and_ignores_the_assumed_yield(self):
+        df = market()
+        self.assertEqual(params().mc_dividends, E.MC_DIVIDENDS_HISTORY)
+        low, high = (E.run_summary(df, params(base_div_yield=y)) for y in (0.0, 0.12))
+        pd.testing.assert_frame_equal(low.mc, high.mc)
+        self.assertAlmostEqual(low.mc_dividend_yield, df['Div_Yield_A'].mean() * 12, delta=0.004)
+
+    def test_asset_that_never_paid_gets_no_dividends(self):
+        df = market(with_b=False)
+        df['Div_Yield_A'] = 0.0
+        res = E.run_summary(df, params(reinvest=False, base_div_yield=0.06))
+        self.assertEqual(res.mc_dividend_yield, 0.0)
+        modelled = E.run_summary(df, params(reinvest=False, base_div_yield=0.06, mc_dividends=E.MC_DIVIDENDS_MODEL))
+        self.assertGreater(modelled.mc_dividend_yield, 0.04)
+        self.assertGreater(modelled.mc['Lev_Final'].median(), res.mc['Lev_Final'].median())
+
+    def test_assumed_yield_mode_follows_the_slider(self):
+        df = market()
+        low, high = (E.run_summary(df, params(base_div_yield=y, mc_dividends=E.MC_DIVIDENDS_MODEL)) for y in (0.02, 0.10))
+        self.assertLess(low.mc_dividend_yield, high.mc_dividend_yield)
+        self.assertLess(low.mc['Lev_Final'].median(), high.mc['Lev_Final'].median())
+
+    def test_scenario_beyond_the_record_still_uses_the_assumed_yield(self):
+        # Entry months that run past the data are filled with the scenario, dividends included.
+        df = market(n=40)
+        low, high = (E.run_summary(df, params(base_div_yield=y)).hist for y in (0.0, 0.12))
+        self.assertTrue(low['Is_Spliced'].all())
+        self.assertLess(low['Lev_Final'].median(), high['Lev_Final'].median())
+
+    def test_unknown_source_is_rejected(self):
+        with self.assertRaises(ValueError):
+            E.run_summary(market(n=30), params(mc_dividends="guess"))
+
+
 class ValidationTests(unittest.TestCase):
     def test_sensible_settings_pass(self):
         E.validate_params(params())

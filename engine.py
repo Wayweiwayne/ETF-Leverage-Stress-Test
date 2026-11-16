@@ -26,6 +26,10 @@ DCA_FULL_PAYMENT = "full"          # the whole scheduled loan payment, regardles
 
 JOB_LOSS_NONE, JOB_LOSS_MANUAL, JOB_LOSS_RANDOM = "none", "manual", "random"
 
+# Where Monte Carlo dividends come from.
+MC_DIVIDENDS_HISTORY = "history"  # the dividend actually paid in each resampled month
+MC_DIVIDENDS_MODEL = "model"      # the assumed future yield (base_div_yield, div_beta)
+
 _SPLICE_SEED = 20240601
 _BACKFILL_SEED = 20240602
 _HIST_JOB_LOSS_SEED = 13572468
@@ -85,6 +89,7 @@ class SimParams:
     block_size: int = 12
     seed: int | None = None
     dca_mode: str = DCA_MATCH_OUT_OF_POCKET
+    mc_dividends: str = MC_DIVIDENDS_HISTORY
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,7 @@ class EngineResults:
     beta_b: float
     job_loss_any_rate: float
     job_loss_avg_months: float
+    mc_dividend_yield: float    # average annual dividend yield across the Monte Carlo paths
     hist_replicates: int        # unemployment draws per entry month (1 unless job loss is random)
     modelled_b_months: int      # historical months in which the second asset had to be modelled
     trace: pd.DataFrame | None = None  # month-by-month ledger of one entry month
@@ -444,6 +450,7 @@ def validate_params(p):
     need(1 <= p.mc_paths <= 100_000, "蒙地卡羅次數必須介於 1 與 100,000。")
     need(p.block_size >= 1, "區塊長度至少 1 個月。")
     need(p.dca_mode in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT), f"未知的 DCA 對照模式：{p.dca_mode}")
+    need(p.mc_dividends in (MC_DIVIDENDS_HISTORY, MC_DIVIDENDS_MODEL), f"未知的蒙地卡羅配息來源：{p.mc_dividends}")
     _unique_order(p.source_order)
     job = p.job_loss
     need(job.mode in (JOB_LOSS_NONE, JOB_LOSS_MANUAL, JOB_LOSS_RANDOM), f"未知的失業模型：{job.mode}")
@@ -466,6 +473,27 @@ def bootstrap_indices(rng, n, block, months, n_paths):
     starts = rng.randint(0, n, size=(blocks_needed, n_paths))
     idx = (starts[:, None, :] + np.arange(block)[None, :, None]) % n
     return idx.reshape(-1, n_paths)[:months, :]
+
+
+def monte_carlo_inputs(m, p, rng):
+    """Resampled returns and dividend yields for every Monte Carlo path, each of shape (months, paths).
+
+    A resampled month brings its price return, the second asset's return and, unless the
+    assumed-yield model is chosen, the dividend actually paid that month. Drawing them together
+    keeps a payout next to the ex-dividend price drop it caused, and gives an asset that never
+    paid anything no dividends.
+    """
+    months, n_paths = p.total_months, int(p.mc_paths)
+    m_disc = p.structural_discount_pct / 100.0 / 12.0
+    idx = bootstrap_indices(rng, m.n, int(max(1, min(p.block_size, m.n))), months, n_paths)
+    ret_a = m.ret_a[idx] - m_disc
+    ret_b = m.ret_b[idx] - m_disc if m.has_b else np.zeros((months, n_paths))
+    _inject_swan(ret_a, ret_b, p.swan_month, p.swan_drop, m.beta_b, m.has_b)
+    if p.mc_dividends == MC_DIVIDENDS_HISTORY:
+        div_a = m.div_a[idx]
+    else:
+        div_a = dividend_model_yields(np.cumprod(1 + ret_a, axis=0), 1.0, p.base_div_yield, p.div_beta)
+    return ret_a, ret_b, div_a
 
 
 def _future_monthly_returns(annual_returns, months):
@@ -627,7 +655,6 @@ def run_summary(df, params):
     p = params
     m, schedule, common, buffer_cash = _setup(df, p)
     months, n = p.total_months, m.n
-    m_disc = p.structural_discount_pct / 100.0 / 12.0
 
     # --- Rolling history ---
     ret_a_hist, ret_b_hist, div_a_hist, win_lens, backfilled = _history_paths(m, p)
@@ -657,16 +684,11 @@ def run_summary(df, params):
     # --- Monte Carlo: block bootstrap of the monthly record ---
     block = int(max(1, min(p.block_size, n)))
     mc_ok = n >= 2
-    any_rate, avg_months = 0.0, 0.0
+    any_rate, avg_months, mc_dividend_yield = 0.0, 0.0, 0.0
     if mc_ok:
-        rng = np.random.RandomState(p.seed)
         n_paths = int(p.mc_paths)
-        idx = bootstrap_indices(rng, n, block, months, n_paths)
-
-        ret_a_mc = m.ret_a[idx] - m_disc
-        ret_b_mc = m.ret_b[idx] - m_disc if m.has_b else np.zeros((months, n_paths))
-        _inject_swan(ret_a_mc, ret_b_mc, p.swan_month, p.swan_drop, m.beta_b, m.has_b)
-        div_a_mc = dividend_model_yields(np.cumprod(1 + ret_a_mc, axis=0), 1.0, p.base_div_yield, p.div_beta)
+        ret_a_mc, ret_b_mc, div_a_mc = monte_carlo_inputs(m, p, np.random.RandomState(p.seed))
+        mc_dividend_yield = float(div_a_mc.mean() * 12)
 
         if p.job_loss.mode == JOB_LOSS_RANDOM:
             job_rng = np.random.RandomState(None if p.seed is None else p.seed + 1)
@@ -691,6 +713,7 @@ def run_summary(df, params):
     return EngineResults(hist=df_hist, mc=df_mc, schedule=schedule, buffer_cash=buffer_cash,
                          block_size=block, mc_ok=mc_ok, vol_drag=float(m.decay), beta_b=float(m.beta_b),
                          job_loss_any_rate=any_rate, job_loss_avg_months=avg_months,
+                         mc_dividend_yield=mc_dividend_yield,
                          hist_replicates=reps, modelled_b_months=m.modelled_b_months)
 
 
