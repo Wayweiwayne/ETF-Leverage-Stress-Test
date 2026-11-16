@@ -110,6 +110,8 @@ python -m unittest -v
 
 測試不需要網路：引擎以合成資料驗證，畫面測試則以假行情跑完整個 App。每次 push 都會由 GitHub Actions 在 Python 3.11、3.12、3.13 上自動執行（`.github/workflows/tests.yml`）。
 
+另一個工作流程（`.github/workflows/refresh-data.yml`）每天更新常用標的的行情存檔並發布到 `market-data` 分支，App 會優先讀取這些存檔，細節見 [DATA_NOTES.md](DATA_NOTES.md)。
+
 ## 授權
 
 Copyright (C) 2026 Wayweiwayne

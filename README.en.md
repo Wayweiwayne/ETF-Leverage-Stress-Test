@@ -113,6 +113,8 @@ python -m unittest -v
 
 The tests need no network access: the engine is checked against synthetic data, and the UI tests run the whole app on stubbed market data. GitHub Actions runs them on Python 3.11, 3.12 and 3.13 on every push (`.github/workflows/tests.yml`).
 
+A second workflow (`.github/workflows/refresh-data.yml`) refreshes snapshots of the most used tickers every day and publishes them on the `market-data` branch; the app reads those before contacting Yahoo Finance. See [DATA_NOTES.md](DATA_NOTES.md) (in Chinese).
+
 ## License
 
 Copyright (C) 2026 Wayweiwayne

@@ -248,6 +248,19 @@ class AppTests(unittest.TestCase):
         self.assertIn("2019-06-03 單日 -7", self.texts(at.warning))
         self.assertNotEqual(self.metric(at, "槓桿期滿中位數 (存活者)"), repaired)
 
+    def test_data_origin_and_download_date_are_shown(self):
+        captions = self.texts(self.start().caption)
+        self.assertIn("資料取得時間 2024-12-31（剛從 Yahoo Finance 取得）", captions)
+        self.assertIn("資料取得時間 2024-11-05（較舊的存檔）", self.texts(self.start(a="STALE.TW").caption))
+
+    def test_reload_button_asks_for_live_data_for_every_ticker_in_use(self):
+        at = self.start(proxy="OLD.TW")
+        with patch('market_data.request_live') as request_live:
+            self.ok(at.sidebar.button[0].click().run())
+        self.assertEqual(sorted(call.args[0] for call in request_live.call_args_list),
+                         ["00631L.TW", "00878.TW", "OLD.TW"])
+        self.assertIn("槓桿破產率 (現金流斷裂)", [m.label for m in at.metric])
+
     def test_snapshot_data_is_flagged_with_its_date(self):
         at = self.start(a="STALE.TW")
         self.assertIn("STALE.TW：即時行情暫時無法取得，目前使用 2024-11-05 存檔的資料", self.texts(at.warning))

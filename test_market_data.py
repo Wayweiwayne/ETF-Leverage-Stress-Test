@@ -53,10 +53,15 @@ class IsolatedSnapshots(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.cache_dir = os.path.join(tmp.name, "cache")
         self.seed_dir = os.path.join(tmp.name, "seed")
-        for name, value in (("SNAPSHOT_DIR", self.cache_dir), ("SEED_DIR", self.seed_dir)):
+        # No mirror, and no stored copy counts as recent: every load asks the (mocked) live source,
+        # unless a test about freshness says otherwise.
+        for name, value in (("SNAPSHOT_DIR", self.cache_dir), ("SEED_DIR", self.seed_dir),
+                            ("MIRROR_URL", ""), ("SNAPSHOT_MAX_AGE_HOURS", -1)):
             patcher = patch.object(market_data, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        market_data._mirror_misses.clear()
+        market_data._live_requests.clear()
         # No test may reach the exchange; those about it replace this with canned answers.
         patcher = patch.object(market_data, "_twse_get", side_effect=ConnectionError("no network in tests"))
         self.twse_get = patcher.start()
@@ -350,7 +355,7 @@ class SnapshotTests(IsolatedSnapshots):
         live = self.fetch(ticker, [good])
         self.assertEqual(live.attrs['data_source'], 'live')
 
-        stale = self.fetch(ticker, [TimeoutError()] * 3)
+        stale = self.fetch(ticker, [TimeoutError()] * 3)     # this suite treats every stored copy as old
         self.assertEqual(stale.attrs['data_source'], 'snapshot')
         self.assertEqual(stale.attrs['fetched_at'], live.attrs['fetched_at'])
         np.testing.assert_allclose(stale['Close'], good['Close'])
@@ -410,6 +415,149 @@ class SnapshotTests(IsolatedSnapshots):
             save_snapshot(daily('2023-01-01', '2023-03-31'), '../escape')
         with self.assertRaises(ValueError):
             read_snapshot('../escape')
+
+
+def copy_fetched(hours_ago, end='2023-06-30', ticker='0056.TW'):
+    """A history that says it was downloaded `hours_ago` hours ago."""
+    df = daily('2023-01-02', end)
+    stamp = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=hours_ago)
+    df.attrs.update(ticker=ticker, fetched_at=stamp.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    return df
+
+
+def as_csv(df):
+    with tempfile.TemporaryDirectory() as folder:
+        with open(save_snapshot(df, df.attrs['ticker'], folder), encoding="utf-8") as fh:
+            return fh.read()
+
+
+class FreshCopyTests(IsolatedSnapshots):
+    """Stored copies up to 36 hours old are used in place of the live source."""
+
+    def setUp(self):
+        super().setUp()
+        self.mirror = {}                                   # ticker -> csv text published on the mirror
+        for target, value in (("SNAPSHOT_MAX_AGE_HOURS", 36), ("MIRROR_URL", "https://mirror.test/data")):
+            patcher = patch.object(market_data, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(market_data, "_http_get_text", side_effect=self.serve)
+        self.http = patcher.start()
+        self.addCleanup(patcher.stop)
+        for target in ("market_data.time.sleep", "market_data.yf.Ticker"):
+            patcher = patch(target)
+            mock = patcher.start()
+            self.addCleanup(patcher.stop)
+        self.yahoo = mock.return_value.history
+        self.yahoo.return_value = daily('2023-01-02', '2023-12-29')
+
+    def serve(self, url, timeout=8):
+        self.assertTrue(url.startswith("https://mirror.test/data/"))
+        name = url.rsplit("/", 1)[1]
+        if name not in self.mirror:
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+        return self.mirror[name]
+
+    def test_recent_local_copy_needs_no_network_at_all(self):
+        save_snapshot(copy_fetched(2), '0056.TW')
+        out = load_history('0056.TW')
+        self.assertEqual(out.attrs['data_source'], 'cache')
+        self.yahoo.assert_not_called()
+        self.http.assert_not_called()
+
+    def test_recent_mirror_copy_replaces_an_old_local_one(self):
+        save_snapshot(copy_fetched(100, end='2023-05-31'), '0056.TW')
+        self.mirror['0056.TW.csv'] = as_csv(copy_fetched(5))
+        out = load_history('0056.TW')
+        self.assertEqual(out.attrs['data_source'], 'mirror')
+        self.assertEqual(out.index.max(), pd.Timestamp('2023-06-30'))
+        self.yahoo.assert_not_called()
+        again = load_history('0056.TW')                     # now kept locally: no second download
+        self.assertEqual(again.attrs['data_source'], 'cache')
+        self.assertEqual(self.http.call_count, 1)
+
+    def test_old_mirror_copy_is_not_good_enough(self):
+        self.mirror['0056.TW.csv'] = as_csv(copy_fetched(100))
+        out = load_history('0056.TW')
+        self.assertEqual(out.attrs['data_source'], 'live')
+        self.assertEqual(out.index.max(), pd.Timestamp('2023-12-29'))
+        self.assertEqual(load_history('0056.TW').attrs['data_source'], 'cache')
+
+    def test_ticker_the_mirror_does_not_carry_is_asked_for_once_an_hour(self):
+        self.assertIsNone(market_data.fetch_mirror('2330.TW'))
+        self.assertIsNone(market_data.fetch_mirror('2330.TW'))
+        self.assertEqual(self.http.call_count, 1)
+        self.assertEqual(load_history('2330.TW').attrs['data_source'], 'live')
+
+    def test_unusable_mirror_file_is_ignored(self):
+        self.mirror['0056.TW.csv'] = "<html>Not what was asked for</html>"
+        self.assertEqual(load_history('0056.TW').attrs['data_source'], 'live')
+
+    def test_symbols_are_escaped_in_the_mirror_address(self):
+        market_data.fetch_mirror('^GSPC')
+        self.assertEqual(self.http.call_args.args[0], "https://mirror.test/data/%5EGSPC.csv")
+
+    def test_mirror_can_be_switched_off(self):
+        with patch.object(market_data, "MIRROR_URL", ""):
+            self.assertEqual(load_history('0056.TW').attrs['data_source'], 'live')
+        self.http.assert_not_called()
+
+    def test_reload_request_goes_to_the_live_source_once(self):
+        save_snapshot(copy_fetched(2), '0056.TW')
+        self.mirror['0056.TW.csv'] = as_csv(copy_fetched(1))
+        market_data.request_live('0056.tw')
+        self.assertEqual(load_history('0056.TW').attrs['data_source'], 'live')
+        self.http.assert_not_called()
+        self.assertEqual(load_history('0056.TW').attrs['data_source'], 'cache')
+        self.assertEqual(self.yahoo.call_count, 1)
+
+    def test_when_the_live_source_fails_the_newest_copy_is_used_and_flagged(self):
+        self.yahoo.side_effect = TimeoutError()
+        save_snapshot(copy_fetched(200, end='2023-03-31'), '0056.TW')
+        self.mirror['0056.TW.csv'] = as_csv(copy_fetched(60, end='2023-06-30'))
+        save_snapshot(copy_fetched(120, end='2023-05-31'), '0056.TW', self.seed_dir)
+        out = load_history('0056.TW')
+        self.assertEqual(out.attrs['data_source'], 'snapshot')
+        self.assertEqual(out.index.max(), pd.Timestamp('2023-06-30'))
+
+    def test_failed_reload_still_falls_back_to_what_is_stored(self):
+        self.yahoo.side_effect = TimeoutError()
+        save_snapshot(copy_fetched(2), '0056.TW')
+        market_data.request_live('0056.TW')
+        self.assertEqual(load_history('0056.TW').attrs['data_source'], 'snapshot')
+
+    def test_copy_without_a_download_time_is_never_treated_as_recent(self):
+        os.makedirs(self.cache_dir)
+        with open(os.path.join(self.cache_dir, '0056.TW.csv'), 'w') as fh:
+            fh.write("Date,Close,Dividends\n2023-01-02,10,0\n2023-01-03,11,0\n")
+        self.assertEqual(load_history('0056.TW').attrs['data_source'], 'live')
+
+    def test_refresh_writes_live_data_and_keeps_the_old_copy_of_a_ticker_that_failed(self):
+        published = copy_fetched(30, end='2023-06-30', ticker='00878.TW')
+        self.mirror['00878.TW.csv'] = as_csv(published)
+        good = daily('2023-01-02', '2023-12-29')
+        self.yahoo.side_effect = lambda **kwargs: good
+        calls = {"n": 0}
+
+        def flaky(symbol):
+            ticker = unittest.mock.MagicMock()
+            ticker.history.side_effect = (lambda **kw: good) if symbol == '0056.TW' else TimeoutError()
+            calls["n"] += 1
+            return ticker
+
+        with patch('market_data.yf.Ticker', side_effect=flaky), tempfile.TemporaryDirectory() as out:
+            live = market_data.refresh_snapshots(['0056.TW', '00878.TW', '9999.TW'], out)
+            self.assertEqual(live, 1)
+            self.assertEqual(sorted(os.listdir(out)), ['0056.TW.csv', '00878.TW.csv'])
+            kept = market_data._stored(out, '00878.TW')
+            self.assertEqual(kept.attrs['fetched_at'], published.attrs['fetched_at'])   # its age stays honest
+            self.assertEqual(market_data._stored(out, '0056.TW').index.max(), pd.Timestamp('2023-12-29'))
+
+    def test_refresh_reports_when_nothing_could_be_downloaded(self):
+        self.yahoo.side_effect = TimeoutError()
+        with tempfile.TemporaryDirectory() as out:
+            self.assertEqual(market_data.refresh_snapshots(['0056.TW'], out), 0)
+            self.assertEqual(os.listdir(out), [])
 
 
 def roc(ts, style="/"):

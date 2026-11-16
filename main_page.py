@@ -8,7 +8,8 @@ import streamlit as st
 
 import engine
 import ui_state as ui
-from market_data import load_history, monthly_data, align_months, backfill_with_proxy, normalize_ticker
+from market_data import (load_history, monthly_data, align_months, backfill_with_proxy, normalize_ticker,
+                         request_live)
 from version import APP_VERSION, SOURCE_URL
 
 LOAN_TYPES = ["理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"]
@@ -66,6 +67,13 @@ DCA_MODES = {
 
 _PATH_RE = re.compile(r"[0-9eE+\-., ]{1,200}")
 SHORT_HISTORY_MONTHS = 120
+DATA_SOURCE_NAMES = {
+    "live": "剛從 Yahoo Finance 取得",
+    "cache": "這台主機先前取得的存檔",
+    "mirror": "每日自動更新的存檔",
+    "snapshot": "較舊的存檔",
+    "snapshot+twse": "較舊的存檔，加上證交所的近期資料",
+}
 
 
 def clean_ticker(raw):
@@ -442,8 +450,13 @@ symbol_a = ticker_a.strip().upper()
 symbol_b = ticker_b.strip().upper() if is_reinvest else ""
 symbol_proxy = ticker_proxy.strip().upper()
 
-if st.sidebar.button("重新載入行情", help="清除這幾檔標的的行情快取並重新取得價格與配息。"):
+if st.sidebar.button("重新載入行情", help="平常會優先使用一天半以內的存檔，不必每次都向行情來源重抓。"
+                                              "按這個按鈕會略過存檔，直接向 Yahoo Finance 重新取得這幾檔標的最新的價格與配息。"):
     for symbol in {symbol_a, symbol_b, symbol_proxy} - {""}:
+        try:
+            request_live(symbol)
+        except ValueError:
+            continue  # a malformed symbol is reported by the load below
         fetch_pure_asset_data.clear(symbol, pay_day_option, repair_splits)
 
 loaded = prepare_unified_data(symbol_a, symbol_b, symbol_proxy, pay_day_option, repair_splits)
@@ -476,7 +489,10 @@ else:
         st.caption("進場當月以該月價格買進，下個月開始繳第一期。處理方式的說明見「計算模型詳細說明」第十節。")
         for symbol, feed in feeds.items():
             role = "（歷史替身）" if symbol == symbol_proxy and symbol not in (symbol_a, symbol_b) else ""
-            st.caption(f"{symbol}{role}：來源價格期間 {feed.attrs['source_start']} 至 {feed.attrs['source_end']}（非成立／上市日期）。")
+            fetched = (feed.attrs.get('fetched_at') or '')[:10]
+            origin = DATA_SOURCE_NAMES.get(feed.attrs.get('data_source'), '')
+            st.caption(f"{symbol}{role}：來源價格期間 {feed.attrs['source_start']} 至 {feed.attrs['source_end']}（非成立／上市日期）。"
+                       + (f"資料取得時間 {fetched}（{origin}）。" if fetched and origin else ""))
             if feed.attrs.get('repairs'):
                 st.info(f"🔧 {symbol} 的來源資料有已知問題，已自動修正：\n\n" + "\n\n".join(f"- {n}" for n in feed.attrs['repairs']))
             if feed.attrs.get('anomalies'):
