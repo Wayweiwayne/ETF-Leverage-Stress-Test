@@ -4,7 +4,8 @@ Pure NumPy/pandas with no UI imports, so the same code can sit behind Streamlit,
 an HTTP API or a batch job. All randomness comes from generators created per call;
 nothing touches NumPy's global random state, which keeps concurrent runs independent.
 """
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -38,6 +39,9 @@ _HIST_MAX_PATHS = 10_000
 _HIST_MAX_REPLICATES = 100
 # Fewer overlapping months than this is too little to estimate how the second asset follows the first.
 _MIN_OVERLAP_FOR_BETA = 12
+# Seed for the safety-limit searches when none is set: every evaluation must draw the same paths.
+_SOLVE_SEED = 42
+_SOLVE_FIELDS = ("principal", "salary_cap")
 
 
 @dataclass(frozen=True)
@@ -806,6 +810,44 @@ def _setup(df, p):
     return market, schedule, _common_args(p, schedule, buffer_cash, ratio_b), buffer_cash
 
 
+def _monte_carlo(m, p, schedule, common, detail):
+    """Block-bootstrap Monte Carlo over every path; needs at least two months of data.
+
+    `detail` adds the per-month net-worth range and the cash flows run_summary reports; whether
+    a path is ruined does not depend on it. Returns the PathResults, the share of paths that were
+    ever unemployed, the average months unemployed, the average annual dividend yield and the
+    5th and 95th percentile of the final annual loan rate.
+    """
+    months, n_paths = p.total_months, int(p.mc_paths)
+    any_rate, avg_months = 0.0, 0.0
+    ret_a_mc, ret_b_mc, div_a_mc = monte_carlo_inputs(m, p, np.random.RandomState(p.seed))
+    mc_dividend_yield = float(div_a_mc.mean() * 12)
+
+    if p.job_loss.mode == JOB_LOSS_RANDOM:
+        job_rng = np.random.RandomState(None if p.seed is None else p.seed + 1)
+        caps_mc = simulate_unemployment(ret_a_mc, p.salary_cap, p.job_loss, job_rng)
+        unemployed = caps_mc < p.salary_cap
+        any_rate = float(unemployed.any(axis=0).mean())
+        avg_months = float(unemployed.sum(axis=0).mean())
+    else:
+        base = salary_cap_schedule(p.salary_cap, p.job_loss, months)
+        caps_mc = np.repeat(base.reshape(-1, 1), n_paths, axis=1)
+
+    # Each path may carry its own loan rate, hence its own payments.
+    rate_rng = np.random.RandomState(None if p.seed is None else p.seed + 2)
+    rates_mc = monte_carlo_rate_paths(p, rate_rng, n_paths)
+    final_rates = np.atleast_1d(rates_mc[-1])
+    rate_p5, rate_p95 = (float(np.percentile(final_rates, q)) for q in (5, 95))
+    payments_mc = (schedule_from_rates(p.principal, rates_mc, p.grace_months).payments
+                   if rates_mc.ndim == 2 else schedule.payments)
+
+    # Only relative price moves matter, so every path starts from a price of 1.
+    mc = simulate_paths(ret_a_mc, ret_b_mc, div_a_mc, np.ones(n_paths), np.ones(n_paths),
+                        salary_cap=caps_mc, quantiles=FAN_QUANTILES if detail else None, keep_flows=detail,
+                        **{**common, "payments": payments_mc})
+    return mc, any_rate, avg_months, mc_dividend_yield, rate_p5, rate_p95
+
+
 def run_summary(df, params):
     """Run both engines on aligned monthly data (see market_data.align_months).
 
@@ -847,32 +889,8 @@ def run_summary(df, params):
     any_rate, avg_months, mc_dividend_yield = 0.0, 0.0, 0.0
     rate_p5 = rate_p95 = float(schedule.monthly_rates[-1] * 12 * 100)
     if mc_ok:
-        n_paths = int(p.mc_paths)
-        ret_a_mc, ret_b_mc, div_a_mc = monte_carlo_inputs(m, p, np.random.RandomState(p.seed))
-        mc_dividend_yield = float(div_a_mc.mean() * 12)
-
-        if p.job_loss.mode == JOB_LOSS_RANDOM:
-            job_rng = np.random.RandomState(None if p.seed is None else p.seed + 1)
-            caps_mc = simulate_unemployment(ret_a_mc, p.salary_cap, p.job_loss, job_rng)
-            unemployed = caps_mc < p.salary_cap
-            any_rate = float(unemployed.any(axis=0).mean())
-            avg_months = float(unemployed.sum(axis=0).mean())
-        else:
-            base = salary_cap_schedule(p.salary_cap, p.job_loss, months)
-            caps_mc = np.repeat(base.reshape(-1, 1), n_paths, axis=1)
-
-        # Each path may carry its own loan rate, hence its own payments.
-        rate_rng = np.random.RandomState(None if p.seed is None else p.seed + 2)
-        rates_mc = monte_carlo_rate_paths(p, rate_rng, n_paths)
-        final_rates = np.atleast_1d(rates_mc[-1])
-        rate_p5, rate_p95 = (float(np.percentile(final_rates, q)) for q in (5, 95))
-        payments_mc = (schedule_from_rates(p.principal, rates_mc, p.grace_months).payments
-                       if rates_mc.ndim == 2 else schedule.payments)
-
-        # Only relative price moves matter, so every path starts from a price of 1.
-        mc = simulate_paths(ret_a_mc, ret_b_mc, div_a_mc, np.ones(n_paths), np.ones(n_paths),
-                            salary_cap=caps_mc, quantiles=FAN_QUANTILES, keep_flows=True,
-                            **{**common, "payments": payments_mc})
+        mc, any_rate, avg_months, mc_dividend_yield, rate_p5, rate_p95 = _monte_carlo(
+            m, p, schedule, common, detail=True)
         df_mc = pd.DataFrame({
             "Is_Ruined": mc.ruined, "Lev_Final": mc.lev_final, "DCA_Final": mc.dca_final,
             "Lev_Win": (~mc.ruined) & (mc.lev_final > mc.dca_final), "Ruin_Month": mc.ruin_month,
@@ -956,3 +974,107 @@ def run(df, params, anchor_idx):
     result = run_summary(df, params)
     result.trace = run_trace(df, params, anchor_idx)
     return result
+
+
+@dataclass(frozen=True)
+class SolveResult:
+    field: str           # "principal" or "salary_cap"
+    value: float | None  # the limit found; None when nothing in the range meets the target
+    ruin_rate: float     # Monte Carlo ruin rate at `value`; with no value, at the end closest to the target
+    target: float        # highest acceptable ruin rate
+    status: str          # "ok", "all_meet" (the whole range meets it) or "none_meet" (none of it does)
+    evaluations: int     # Monte Carlo runs actually made
+
+
+def _solve_seed(params):
+    return _SOLVE_SEED if params.seed is None else params.seed
+
+
+def _require_monte_carlo(df):
+    if len(df) < 2:
+        raise ValueError("資料至少需要 2 個月才能跑蒙地卡羅模擬。")
+
+
+def _mc_ruin_rate(df, p):
+    """Share of Monte Carlo paths ruined, exactly as run_summary would report it, without the rolling history."""
+    m, schedule, common, _ = _setup(df, p)
+    return float(_monte_carlo(m, p, schedule, common, detail=False)[0].ruined.mean())
+
+
+def solve_for(df, params, field, target_ruin, lo, hi, step):
+    """Safety limit of one setting: the Monte Carlo ruin rate must stay at or below `target_ruin`.
+
+    `field="principal"` finds the largest loan, `field="salary_cap"` the smallest monthly
+    out-of-pocket cap, among lo, lo + step, lo + 2*step, ... up to hi, and hi itself when it is
+    not on that grid. Every other setting comes from `params`. Every evaluation draws the same
+    paths (seed 42 when `params.seed` is None), so the ruin rate moves with the setting alone and
+    a binary search is enough; the rate reported is always one actually simulated.
+    """
+    if field not in _SOLVE_FIELDS:
+        raise ValueError(f"求解項目必須是 principal（貸款本金）或 salary_cap（每月自掏上限），收到：{field!r}")
+    if not 0 < target_ruin < 1:
+        raise ValueError("目標破產率必須介於 0 與 1 之間（不含 0 與 1）。")
+    if not all(np.isfinite(v) for v in (lo, hi, step)):
+        raise ValueError("搜尋範圍與間距必須是有限的數字。")
+    if lo > hi:
+        raise ValueError("搜尋下限不可大於上限。")
+    if step <= 0:
+        raise ValueError("搜尋間距必須大於 0。")
+    if lo < 0:
+        raise ValueError("搜尋下限不可為負。")
+    if field == "principal" and lo == 0:
+        raise ValueError("貸款本金的搜尋下限必須大於 0。")
+    _require_monte_carlo(df)
+
+    # Grid points lo + k*step up to hi; when hi is off the grid it is one extra point past the last.
+    top = int(math.floor((hi - lo) / step + 1e-9))
+    on_grid = math.isclose(lo + top * step, hi, rel_tol=1e-12, abs_tol=1e-9 * step)
+    last = top if on_grid else top + 1
+    base = replace(params, seed=_solve_seed(params))
+    rates = {}
+
+    def value(k):
+        return float(hi) if k == last else float(lo + k * step)
+
+    def meets(k):
+        if k not in rates:
+            rates[k] = _mc_ruin_rate(df, replace(base, **{field: value(k)}))
+        return rates[k] <= target_ruin
+
+    def result(k, status):
+        return SolveResult(field, None if status == "none_meet" else value(k), rates[k], float(target_ruin),
+                           status, len(rates))
+
+    if field == "principal":
+        if meets(last):
+            return result(last, "all_meet")
+        if not meets(0):
+            return result(0, "none_meet")
+        good, bad = 0, last
+    else:
+        if meets(0):
+            return result(0, "all_meet")
+        if not meets(last):
+            return result(last, "none_meet")
+        good, bad = last, 0
+    while abs(good - bad) > 1:
+        mid = (good + bad) // 2
+        if meets(mid):
+            good = mid
+        else:
+            bad = mid
+    return result(good, "ok")
+
+
+def sensitivity_grid(df, params, principals, salary_caps, mc_paths=1000):
+    """Monte Carlo ruin rate for every pair of loan principal (rows) and monthly out-of-pocket cap (columns).
+
+    Rows and columns keep the order given. Every other setting comes from `params`, with
+    `mc_paths` paths, and every cell draws the same paths (seed 42 when `params.seed` is None).
+    """
+    _require_monte_carlo(df)
+    principals, salary_caps = list(principals), list(salary_caps)
+    base = replace(params, seed=_solve_seed(params), mc_paths=mc_paths)
+    rates = [[_mc_ruin_rate(df, replace(base, principal=pr, salary_cap=cap)) for cap in salary_caps]
+             for pr in principals]
+    return pd.DataFrame(rates, index=principals, columns=salary_caps, dtype=float)

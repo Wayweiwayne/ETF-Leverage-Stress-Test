@@ -1,4 +1,7 @@
+import dataclasses
+import math
 import unittest
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -1000,6 +1003,241 @@ class ScenarioParsingTests(unittest.TestCase):
         self.assertEqual(len(monthly), 48)
         self.assertAlmostEqual(np.prod(1 + monthly[:12]), 1.12)
         np.testing.assert_allclose(monthly[24:36], monthly[12:24])
+
+
+def mc_ruin(df, p, **overrides):
+    """Monte Carlo ruin rate that run_summary reports for `p` with `overrides`."""
+    return float(E.run_summary(df, dataclasses.replace(p, **overrides)).mc["Is_Ruined"].mean())
+
+
+def evaluation_budget(lo, hi, step):
+    return math.ceil(math.log2((hi - lo) / step)) + 3
+
+
+def candidates(lo, hi, step):
+    """Every value solve_for may return: the grid lo + k*step up to hi, then hi itself."""
+    values = [lo + k * step for k in range(int((hi - lo) / step + 1e-9) + 1)]
+    return values if math.isclose(values[-1], hi) else values + [hi]
+
+
+class SolveForTests(unittest.TestCase):
+    # At a 10% loan rate and 25,000 a month the safe loan sits around 10 million.
+    df = market()
+    p = params(annual_rate_pct=10.0)
+
+    def test_largest_safe_principal_is_on_the_grid_and_one_step_more_is_unsafe(self):
+        lo, hi, step = 1_000_000.0, 30_000_000.0, 1_000_000.0
+        res = E.solve_for(self.df, self.p, "principal", 0.05, lo, hi, step)
+        self.assertEqual((res.field, res.status, res.target), ("principal", "ok", 0.05))
+        self.assertTrue(lo < res.value < hi)
+        self.assertAlmostEqual((res.value - lo) / step, round((res.value - lo) / step))
+        self.assertEqual(res.ruin_rate, mc_ruin(self.df, self.p, principal=res.value))
+        self.assertLessEqual(res.ruin_rate, 0.05)
+        self.assertGreater(mc_ruin(self.df, self.p, principal=res.value + step), 0.05)
+        self.assertLessEqual(res.evaluations, evaluation_budget(lo, hi, step))
+
+    def test_smallest_safe_salary_cap_is_on_the_grid_and_one_step_less_is_unsafe(self):
+        p = dataclasses.replace(self.p, principal=10_000_000.0)
+        lo, hi, step = 0.0, 100_000.0, 1_000.0
+        res = E.solve_for(self.df, p, "salary_cap", 0.05, lo, hi, step)
+        self.assertEqual((res.field, res.status), ("salary_cap", "ok"))
+        self.assertTrue(lo < res.value < hi)
+        self.assertEqual(res.value % step, 0)
+        self.assertEqual(res.ruin_rate, mc_ruin(self.df, p, salary_cap=res.value))
+        self.assertLessEqual(res.ruin_rate, 0.05)
+        self.assertGreater(mc_ruin(self.df, p, salary_cap=res.value - step), 0.05)
+        self.assertLessEqual(res.evaluations, evaluation_budget(lo, hi, step))
+
+    def test_whole_range_meeting_the_target(self):
+        res = E.solve_for(self.df, self.p, "principal", 0.5, 1_000_000.0, 30_000_000.0, 1_000_000.0)
+        self.assertEqual((res.status, res.value, res.evaluations), ("all_meet", 30_000_000.0, 1))
+        self.assertEqual(res.ruin_rate, mc_ruin(self.df, self.p, principal=30_000_000.0))
+        res = E.solve_for(self.df, self.p, "salary_cap", 0.5, 0.0, 100_000.0, 1_000.0)
+        self.assertEqual((res.status, res.value, res.evaluations), ("all_meet", 0.0, 1))
+        self.assertEqual(res.ruin_rate, mc_ruin(self.df, self.p, salary_cap=0.0))
+
+    def test_nothing_in_range_meets_the_target(self):
+        poor = dataclasses.replace(self.p, salary_cap=0.0)
+        res = E.solve_for(self.df, poor, "principal", 0.05, 1_000_000.0, 30_000_000.0, 1_000_000.0)
+        self.assertEqual((res.status, res.value), ("none_meet", None))
+        # The rate reported is that of the end closest to meeting the target: the smallest loan.
+        self.assertEqual(res.ruin_rate, mc_ruin(self.df, poor, principal=1_000_000.0))
+        self.assertGreater(res.ruin_rate, 0.05)
+        self.assertEqual(res.evaluations, 2)
+        big = dataclasses.replace(self.p, principal=50_000_000.0)
+        res = E.solve_for(self.df, big, "salary_cap", 0.01, 0.0, 50_000.0, 1_000.0)
+        self.assertEqual((res.status, res.value), ("none_meet", None))
+        self.assertEqual(res.ruin_rate, mc_ruin(self.df, big, salary_cap=50_000.0))
+        self.assertEqual(res.evaluations, 2)
+
+    def test_answer_is_a_grid_point_counted_from_lo(self):
+        lo, hi, step = 1_234_567.0, 29_000_000.0, 700_000.0
+        res = E.solve_for(self.df, self.p, "principal", 0.05, lo, hi, step)
+        self.assertEqual(res.status, "ok")
+        k = (res.value - lo) / step
+        self.assertAlmostEqual(k, round(k), places=9)
+        self.assertGreater(mc_ruin(self.df, self.p, principal=res.value + step), 0.05)
+
+    def test_hi_off_the_grid_is_checked_too(self):
+        # Principal: 1, 4 and 7 million are on the grid; 8.5 million is not but still meets the target.
+        res = E.solve_for(self.df, self.p, "principal", 0.5, 1_000_000.0, 8_500_000.0, 3_000_000.0)
+        self.assertEqual((res.status, res.value), ("all_meet", 8_500_000.0))
+        # Salary: only hi itself, past the last grid point, is enough.
+        p = dataclasses.replace(self.p, principal=10_000_000.0)
+        below, at_hi = mc_ruin(self.df, p, salary_cap=40_000.0), mc_ruin(self.df, p, salary_cap=50_000.0)
+        self.assertGreater(below, at_hi)
+        res = E.solve_for(self.df, p, "salary_cap", (below + at_hi) / 2, 0.0, 50_000.0, 20_000.0)
+        self.assertEqual((res.status, res.value, res.ruin_rate), ("ok", 50_000.0, at_hi))
+        # And when hi fails, the answer is the last grid point below it.
+        on_grid = mc_ruin(self.df, self.p, principal=10_000_000.0)
+        off_grid = mc_ruin(self.df, self.p, principal=10_500_000.0)
+        self.assertLess(on_grid, off_grid)
+        res = E.solve_for(self.df, self.p, "principal", (on_grid + off_grid) / 2, 1_000_000.0, 10_500_000.0, 1_000_000.0)
+        self.assertEqual((res.status, res.value, res.ruin_rate), ("ok", 10_000_000.0, on_grid))
+
+    def test_evaluations_stay_within_the_budget_and_are_counted_exactly(self):
+        for lo, hi, step in ((100_000.0, 100_000_000.0, 100_000.0), (0.0, 500_000.0, 1_000.0),
+                             (1_000_000.0, 1_500_000.0, 1_000_000.0), (100_000.0, 30_150_000.0, 100_000.0)):
+            for field_name, flip in (("principal", False), ("salary_cap", True)):
+                for cut in np.linspace(lo, hi, 7):
+                    def fake(df, p, cut=cut, flip=flip, field_name=field_name):
+                        return 0.2 if (getattr(p, field_name) <= cut) != flip else 0.8
+                    with mock.patch.object(E, "_mc_ruin_rate", side_effect=fake) as calls:
+                        res = E.solve_for(self.df, self.p, field_name, 0.5, max(lo, 1.0) if field_name == "principal"
+                                          else lo, hi, step)
+                    self.assertEqual(res.evaluations, calls.call_count)
+                    self.assertLessEqual(res.evaluations, evaluation_budget(max(lo, 1.0), hi, step))
+
+    def test_binary_search_finds_the_same_answer_as_trying_every_value(self):
+        rng = np.random.RandomState(0)
+        for _ in range(300):
+            step = float(rng.choice([1.0, 7.0, 1_000.0, 100_000.0, 0.25]))
+            lo = step * rng.randint(1, 50) + float(rng.choice([0.0, 0.5 * step]))
+            hi = lo + step * rng.randint(0, 600) + float(rng.choice([0.0, 0.3 * step]))
+            cut = rng.uniform(lo - (hi - lo) * 0.2 - step, hi + (hi - lo) * 0.2 + step)
+            values = candidates(lo, hi, step)
+            for field_name in ("principal", "salary_cap"):
+                safe = [v for v in values if (v <= cut if field_name == "principal" else v >= cut)]
+                with mock.patch.object(E, "_mc_ruin_rate",
+                                       side_effect=lambda df, p, f=field_name: 0.0 if getattr(p, f) in safe else 1.0):
+                    res = E.solve_for(self.df, self.p, field_name, 0.5, lo, hi, step)
+                msg = (field_name, lo, hi, step, cut)
+                if not safe:
+                    self.assertEqual((res.status, res.value, res.ruin_rate), ("none_meet", None, 1.0), msg)
+                    continue
+                best = max(safe) if field_name == "principal" else min(safe)
+                whole = len(safe) == len(values)
+                self.assertEqual(res.status, "all_meet" if whole else "ok", msg)
+                self.assertEqual(res.value, best, msg)
+                self.assertEqual(res.ruin_rate, 0.0, msg)
+                if hi > lo:
+                    self.assertLessEqual(res.evaluations, evaluation_budget(lo, hi, step), msg)
+
+    def test_parameters_passed_in_are_left_alone(self):
+        p = params(annual_rate_pct=10.0, seed=None, mc_paths=100)
+        before = dataclasses.replace(p)
+        E.solve_for(self.df, p, "principal", 0.05, 1_000_000.0, 30_000_000.0, 1_000_000.0)
+        E.solve_for(self.df, p, "salary_cap", 0.05, 0.0, 100_000.0, 1_000.0)
+        E.sensitivity_grid(self.df, p, [1e6, 2e6], [0.0, 1e4], mc_paths=50)
+        self.assertEqual(p, before)
+        self.assertIsNone(p.seed)
+
+    def test_every_evaluation_draws_the_same_paths(self):
+        for seed, expected in ((None, 42), (7, 7)):
+            seen = []
+            with mock.patch.object(E, "_mc_ruin_rate", side_effect=lambda df, p: seen.append(p) or 0.1):
+                E.solve_for(self.df, params(seed=seed), "salary_cap", 0.05, 0.0, 100_000.0, 1_000.0)
+                E.solve_for(self.df, params(seed=seed), "principal", 0.05, 1e6, 1e7, 1e6)
+                E.sensitivity_grid(self.df, params(seed=seed), [1e6, 2e6], [0.0, 1e4])
+            self.assertEqual({q.seed for q in seen}, {expected})
+        unseeded = params(annual_rate_pct=10.0, seed=None, mc_paths=100)
+        res = E.solve_for(self.df, unseeded, "principal", 0.05, 1_000_000.0, 30_000_000.0, 1_000_000.0)
+        self.assertEqual(res, E.solve_for(self.df, dataclasses.replace(unseeded, seed=42), "principal", 0.05,
+                                          1_000_000.0, 30_000_000.0, 1_000_000.0))
+        self.assertEqual(res.ruin_rate, mc_ruin(self.df, unseeded, principal=res.value, seed=42))
+
+    def test_other_settings_come_from_the_parameters(self):
+        seen = []
+        p = params(seed=3, mc_paths=123, annual_rate_pct=7.0, buffer_months=6)
+        with mock.patch.object(E, "_mc_ruin_rate", side_effect=lambda df, q: seen.append(q) or 0.01):
+            res = E.solve_for(self.df, p, "principal", 0.05, 1e6, 1e7, 1e6)
+        self.assertEqual(res.value, 1e7)
+        self.assertEqual(seen, [dataclasses.replace(p, principal=1e7)])
+
+    def test_bad_requests_are_rejected_in_chinese(self):
+        bad = [
+            dict(field="loan"), dict(field="Principal"),
+            dict(target_ruin=0.0), dict(target_ruin=1.0), dict(target_ruin=-0.1), dict(target_ruin=float("nan")),
+            dict(lo=2e6, hi=1e6), dict(step=0.0), dict(step=-1e5), dict(step=float("nan")),
+            dict(lo=-1.0), dict(lo=0.0), dict(hi=float("inf")),
+            dict(field="salary_cap", lo=-1_000.0, hi=10_000.0, step=1_000.0),
+            dict(df=self.df.iloc[:1]), dict(df=self.df.iloc[:0]),
+        ]
+        for overrides in bad:
+            args = dict(df=self.df, params=self.p, field="principal", target_ruin=0.05, lo=1e6, hi=2e6, step=1e5)
+            args.update(overrides)
+            with mock.patch.object(E, "_mc_ruin_rate", return_value=0.0) as calls:
+                with self.assertRaises(ValueError, msg=overrides) as ctx:
+                    E.solve_for(**args)
+            self.assertRegex(str(ctx.exception), r"[一-鿿]", overrides)
+            self.assertEqual(calls.call_count, 0, overrides)
+        # A salary search may start from nothing at all.
+        res = E.solve_for(self.df, self.p, "salary_cap", 0.5, 0.0, 10_000.0, 1_000.0)
+        self.assertEqual(res.value, 0.0)
+        with self.assertRaises(ValueError):
+            E.sensitivity_grid(self.df.iloc[:1], self.p, [1e6], [0.0])
+        with self.assertRaisesRegex(ValueError, "蒙地卡羅次數"):
+            E.sensitivity_grid(self.df, self.p, [1e6], [0.0], mc_paths=0)
+
+    def test_lo_equal_to_hi_is_one_evaluation(self):
+        res = E.solve_for(self.df, self.p, "principal", 0.5, 5e6, 5e6, 1e6)
+        self.assertEqual((res.status, res.value, res.evaluations), ("all_meet", 5e6, 1))
+        res = E.solve_for(self.df, self.p, "salary_cap", 1e-6, 0.0, 0.0, 1_000.0)
+        self.assertEqual((res.status, res.value, res.evaluations), ("none_meet", None, 1))
+
+
+class SensitivityGridTests(unittest.TestCase):
+    df = market()
+    p = params(annual_rate_pct=10.0, principal=10_000_000.0)
+
+    def test_rows_and_columns_keep_the_order_given(self):
+        principals = [20_000_000.0, 5_000_000.0, 10_000_000.0]
+        caps = [50_000.0, 0.0, 25_000.0, 10_000.0]
+        grid = E.sensitivity_grid(self.df, self.p, principals, caps, mc_paths=200)
+        self.assertEqual(grid.shape, (3, 4))
+        self.assertEqual(list(grid.index), principals)
+        self.assertEqual(list(grid.columns), caps)
+        self.assertTrue(((grid >= 0) & (grid <= 1)).all().all())
+        for pr, cap in ((20_000_000.0, 0.0), (5_000_000.0, 50_000.0), (10_000_000.0, 10_000.0)):
+            self.assertEqual(grid.loc[pr, cap], mc_ruin(self.df, self.p, principal=pr, salary_cap=cap, mc_paths=200))
+
+    def test_current_settings_cell_matches_the_summary(self):
+        settings = [
+            self.p,
+            dataclasses.replace(self.p, seed=None),
+            dataclasses.replace(self.p, seed=11, rate_volatility_pct=1.0, mc_dividends=E.MC_DIVIDENDS_MODEL,
+                                job_loss=E.JobLossParams(mode=E.JOB_LOSS_RANDOM, annual_prob=0.2, crash_linked=True)),
+            dataclasses.replace(self.p, nhi_rate=0.0211, dividend_tax_rate=0.05, buffer_months=6, loan_fee=10_000.0,
+                                grace_months=12, job_loss=E.JobLossParams(mode=E.JOB_LOSS_MANUAL, start_month=5,
+                                                                          duration_months=12)),
+        ]
+        for p in settings:
+            grid = E.sensitivity_grid(self.df, p, [5e6, p.principal], [0.0, p.salary_cap], mc_paths=p.mc_paths)
+            seeded = dataclasses.replace(p, seed=42 if p.seed is None else p.seed)
+            self.assertEqual(grid.loc[p.principal, p.salary_cap], mc_ruin(self.df, seeded))
+
+    def test_ruin_falls_with_more_support_and_rises_with_a_bigger_loan(self):
+        p = dataclasses.replace(self.p, seed=None, nhi_rate=0.0211, dividend_interval_months=3)
+        grid = E.sensitivity_grid(self.df, p, [2e6, 5e6, 8e6, 12e6, 20e6, 40e6],
+                                  [0.0, 10_000.0, 25_000.0, 50_000.0, 100_000.0], mc_paths=300)
+        values = grid.to_numpy()
+        self.assertTrue((np.diff(values, axis=1) <= 0).all())
+        self.assertTrue((np.diff(values, axis=0) >= -0.01).all())
+        self.assertGreater(values[-1, 1], values[0, 1])        # the grid is not flat
+
+    def test_empty_axes_give_an_empty_table(self):
+        self.assertEqual(E.sensitivity_grid(self.df, self.p, [], [0.0]).shape, (0, 1))
+        self.assertEqual(E.sensitivity_grid(self.df, self.p, [1e6], []).shape, (1, 0))
 
 
 if __name__ == '__main__':
