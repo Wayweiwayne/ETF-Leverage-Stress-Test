@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+import market_data
 from version import APP_VERSION
 
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
@@ -42,6 +43,10 @@ def fake_history(ticker):
 class AppTests(unittest.TestCase):
     def setUp(self):
         st.cache_data.clear()
+        patcher = patch('market_data.MIRROR_URL', '')         # no network: no mirror, no index
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        market_data._index_cache.update(at=float("-inf"), entries=None)
         patcher = patch('market_data.load_history', side_effect=fake_history)
         self.load_history = patcher.start()
         self.addCleanup(patcher.stop)
@@ -294,10 +299,26 @@ class AppTests(unittest.TestCase):
 
     def test_standalone_notice_appears_only_without_a_live_source(self):
         self.assertNotIn("這是單機版", self.texts(self.start().info))
-        with patch('market_data.yf', None):
+        index = {f"00{n:03d}.TW": {"name": f"ETF {n}", "listed": "2020-01-01"} for n in range(247)}
+        with patch('market_data.yf', None), patch('market_data.mirror_index', return_value=index), \
+                patch('market_data._listed_extras', return_value=set()):
             at = self.start()
-        self.assertIn("這是單機版", self.texts(at.info))
-        self.assertIn("00878.TW", self.texts(at.info))
+        self.assertIn("可以使用所有台灣上市的 ETF（目前 247 檔", self.texts(at.info))
+
+    def test_earliest_entry_month_is_explained_without_a_proxy(self):
+        index = {"00878.TW": {"name": "國泰永續高股息", "listed": "2016-01-04"}}
+        with patch('market_data.mirror_index', return_value=index):
+            at = self.start(proxy="")
+        captions = self.texts(at.caption)
+        self.assertIn("📅 最早只能從 2016-02 進場：00878.TW 的第一筆價格在 2016-01-04", captions)
+        self.assertIn("（證交所公告的上市日是 2016-01-04）", captions)
+        self.assertIn("指定一檔上市更久的 ETF，用它的舊資料補上", captions)
+
+    def test_earliest_entry_month_is_explained_with_a_proxy(self):
+        captions = self.texts(self.start(proxy="OLD.TW").caption)
+        self.assertIn("📅 最早可以從 2006-02 進場：00878.TW 從 2016-02 才有自己的資料，"
+                      "在那之前的 120 個月，用替身 OLD.TW 當時的實際漲跌與配息補上。", captions)
+        self.assertNotIn("證交所公告的上市日", captions)                 # no index available in tests
 
     def test_data_origin_and_download_date_are_shown(self):
         captions = self.texts(self.start().caption)

@@ -68,7 +68,7 @@ The screenshots use this scenario, which you can reproduce by appending it to th
 
 - The first visit needs an internet connection to download about 30 MB of Python runtime ([stlite](https://github.com/whitphx/stlite) on Pyodide); the browser caches it afterwards.
 - All calculations run on your own computer.
-- There is no live market data: only the tickers in `data/mirror_tickers.txt`, refreshed daily, with the snapshots embedded in the file as a fallback.
+- Every ETF listed on the Taiwan Stock Exchange is available, refreshed daily; anything else needs the web version. Eight common ETFs are embedded in the file as a fallback.
 - Rebuild it after changing the code: `python build_standalone.py` (a test fails when it is out of date).
 
 ## Run locally

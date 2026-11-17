@@ -66,7 +66,7 @@
 
 - 第一次打開需要連網，下載約 30 MB 的 Python 執行環境（[stlite](https://github.com/whitphx/stlite)／Pyodide），之後瀏覽器會快取。
 - 計算全部在你的電腦上進行。
-- 無法即時查詢行情，只能使用 `data/mirror_tickers.txt` 列出、每天自動更新的標的；連不上時改用檔案內建的存檔。
+- 可以使用所有台灣上市的 ETF（每天自動更新）；上市 ETF 以外的商品要用網頁版。連不上存檔時，改用檔案內建的 8 檔常用 ETF。
 - 程式碼更新後要重新產生：`python build_standalone.py`（測試會檢查這個檔案是否過期）。
 
 ## 本機執行
