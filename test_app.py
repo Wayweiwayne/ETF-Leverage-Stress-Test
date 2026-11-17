@@ -12,7 +12,7 @@ import market_data
 from version import APP_VERSION
 
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
-MORTGAGE, CREDIT = "理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"
+MORTGAGE, CREDIT = "理財型房貸（年限長，可設寬限期）", "一般信貸（年限短，通常無寬限期）"
 SOURCES = ["薪水（自掏腰包）", "存下來的配息", "緩衝金", "賣第一標的", "賣第二標的"]
 MC_RUIN = "破產機率（繳不出貸款）"
 
@@ -575,11 +575,11 @@ class AppTests(unittest.TestCase):
             self.ok(at.run())
         parts = spy.call_args.kwargs
         self.assertEqual(dict(parts["settings"])["安全邊界的目標"], "破產機率 ≤ 5%")
-        self.assertIn(("安全邊界（破產機率 ≤ 5%）", [("最多可以借", "5,000 萬以上"), ("借到上限時的破產機率",
-                                                                                  parts["summaries"][-1][1][1][1]),
-                                                ("每月最少要自掏", "$0"),
-                                                ("自掏到下限時的破產機率", parts["summaries"][-1][1][3][1])]),
-                      parts["summaries"])
+        group, rows = parts["summaries"][-1]
+        self.assertEqual(group, "安全邊界（破產機率 ≤ 5%）")
+        self.assertEqual([label for label, _ in rows],
+                         ["最多可以借", "借到 5,000 萬時的破產機率", "每月最少要自掏", "完全不自掏時的破產機率"])
+        self.assertEqual((rows[0][1], rows[2][1]), ("5,000 萬以上", "$0"))
         self.assertIn("破產機率地圖：借多少 × 每月自掏多少", [h for h, _, _ in parts["tables"]])
         self.assertIn("破產機率地圖：借多少 × 每月自掏多少", [h for h, _, _ in parts["figures"]])
 
@@ -594,9 +594,17 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("舊設定", self.texts(at.warning))
 
     def test_safety_limit_without_salary_in_the_order(self):
-        at = self.find_limit(self.start(p1="3", p2="5", p3="4", p4="4", p5="4", seed="1"))
+        import report
+        with patch('report.build_report', wraps=report.build_report) as spy:
+            at = self.find_limit(self.start(p1="3", p2="5", p3="4", p4="4", p5="4", seed="1"))
         self.assertIn("你沒有把「薪水（自掏腰包）」排進還款順位", self.texts(at.info))
         self.assertNotIn("每月最少要自掏", [m.label for m in at.metric])
+        captions = self.texts(at.caption)
+        self.assertIn("你沒有用薪水補貼還款。這時借多借少", captions)
+        self.assertIn("你沒有把薪水排進還款順位，所以地圖上每一格幾乎都一樣", captions)
+        rows = dict(next(rows for group, rows in spy.call_args.kwargs["summaries"] if group.startswith("安全邊界")))
+        self.assertEqual(rows["每月最少要自掏"], "不計算（薪水沒有排進還款順位）")
+        self.assertEqual(len(rows), 3)                                       # no rate row for a search not run
         rows = at.table[0].value.map(lambda cell: cell.removeprefix("◆ ")).to_numpy()
         self.assertTrue((rows == rows[:, :1]).all())                         # the cap changes nothing
 
@@ -605,6 +613,23 @@ class AppTests(unittest.TestCase):
         self.assertIn("你關閉了「固定亂數」，安全邊界固定用同一組抽樣計算", self.texts(at.caption))
         self.assertEqual(list(at.table[0].value.iloc[0]), ["—"] * 6)       # 250 萬 does not cover the fee
         self.assertIn("「—」的格子", self.texts(at.caption))
+        grey, heat = self.heatmap(at)["data"]
+        self.assertEqual(grey["text"][0], ["—"] * 6)
+        self.assertEqual(grey["textfont"]["color"], "#0b0b0b")             # readable on grey in either theme
+        self.assertEqual(heat["text"][0], [""] * 6)
+
+    def test_zero_salary_cap_explains_the_first_column(self):
+        at = self.find_limit(self.start(salary="0", seed="1"))
+        self.assertEqual(list(at.table[0].value.columns), ["$0", "$5,000", "$10,000", "$20,000", "$30,000", "$50,000"])
+        self.assertIn("你的每月最多自掏是 0，所以最左邊「\\$0」那一欄上下幾乎都一樣", self.texts(at.caption))
+        self.assertIn("你沒有用薪水補貼還款。", self.texts(at.caption))
+
+    def test_random_job_loss_is_described_in_full(self):
+        at = self.start(jl="1", jl_mode="1", jl_prob="5", jl_mean="5.5")
+        self.assertRegex(self.flags(at), r"隨機失業（年失業機率 5\.0%，平均失業 5\.5 個月，對數常態，每月最多自掏 \\\$0；"
+                                         r"崩盤（單月跌超過 15%）時年失業機率再加 8～12%｜蒙地卡羅中 \d+\.\d% 的路徑失業過，"
+                                         r"平均失業 \d+\.\d 個月）")
+        self.assertNotIn("崩盤（", self.flags(self.start(jl="1", jl_mode="1", jl_crash="0")))
 
     def test_blank_second_ticker_reinvests_everything_in_the_first(self):
         at = self.start()

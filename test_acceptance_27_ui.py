@@ -25,6 +25,24 @@ STALE = "⚠️ 設定已變更，下面的安全邊界是用舊設定算的。�
 MULTIPLIERS = (0.5, 0.75, 1, 1.25, 1.5, 2)
 ZERO_CAPS = [0.0, 5_000.0, 10_000.0, 20_000.0, 30_000.0, 50_000.0]
 PCT = re.compile(r"(\d+(?:\.\d+)?)%")
+GRAY = "#a3a29c"
+# DESIGN 7.6（衝刺 2 修訂文案）
+C03 = ("借越多，每月還款和買進的資產都會等比例變大，每月自掏那筆固定的錢就越不夠看，所以破產機率不會一直升高，"
+       "而是慢慢接近「完全不自掏」時的水準；這個水準在 {t} 以下，所以整個搜尋範圍都達標。"
+       "破產機率低不代表風險小：借越多，一旦出事賠得也越多。")
+_NO_SALARY = ("你沒有用薪水補貼還款。這時借多借少，每月還款和買進的資產都等比例變大或變小，破產機率幾乎不變，"
+              "所以「最多可以借」不是「{hi} 萬以上」就是「不到 {lo} 萬」，不會落在中間。")
+C04 = _NO_SALARY + "這次的破產機率在 {t} 以下，所以整個搜尋範圍都達標。破產機率低不代表風險小：借越多，一旦出事賠得也越多。"
+C05 = _NO_SALARY + "這次的破產機率超過 {t}，調整本金沒有用；要從利率、年限、還款的順序或每月自掏的錢下手。"
+C06 = "問題可能不在借多少，而是利率、年限、每月自掏的錢或還款的順序；可以看看下面的地圖。"
+C07 = "你沒有把薪水排進還款順位，所以地圖上每一格幾乎都一樣：借多少、每月自掏多少，都不太影響破產機率。"
+C08 = ("你的每月最多自掏是 0，所以最左邊「$0」那一欄上下幾乎都一樣：不自掏的話，借多少都不太影響破產機率。"
+       "往右看，是每月補一點錢的效果。")
+OLD_ALL_MEET = "這通常代表每月自掏的上限設得很高"
+MAP_HOW = "怎麼看這張圖："
+MAP_ESTIMATE = "安全邊界只看蒙地卡羅模擬的破產機率，不看歷史回測。它是用歷史行情重新組合出來的估計，不是保證。"
+DASH_NOTE = "「—」的格子：貸款本金不比開辦費多，借到的錢扣掉開辦費就沒了，無法計算。"
+NO_SALARY_ORDER = dict(p1="3", p2="5", p3="4", p4="4", p5="4")
 
 
 @contextmanager
@@ -113,6 +131,13 @@ class SafetyHarness(AppHarness):
                 self.assertEqual(len(tables), 1)
                 return tables[0].value
         self.fail("找不到「用表格看這張地圖」")
+
+    def main_trace(self, spec):
+        """主熱圖（有色標的那一層）；開辦費的灰色圖層 showscale=False。"""
+        layers = [t for t in spec["data"] if t.get("type") == "heatmap"]
+        main = [t for t in layers if t.get("showscale") is not False]
+        self.assertEqual(len(main), 1, "應該只有一層有色標的熱圖")
+        return main[0]
 
     def heatmap(self, at):
         for node in at.get("plotly_chart"):
@@ -322,8 +347,12 @@ class HeatmapTests(SafetyHarness, unittest.TestCase):
         at, _, _ = self.press(self.start())
         self.assertTrue(any(MAP_TITLE in t for t in self.section_texts(at)))                     # S-30
         spec = self.heatmap(at)
-        trace = next(t for t in spec["data"] if t.get("type") == "heatmap")
+        trace = self.main_trace(spec)
         self.assertEqual((len(trace["z"]), len(trace["z"][0])), (6, 6))
+        layout = spec["layout"]
+        self.assertEqual(layout.get("height"), 400, "V-06／S-37：高 400px")
+        self.assertEqual(((layout.get("margin") or {}).get("t"), (layout.get("margin") or {}).get("b")), (30, 10),
+                         "V-06／S-37：margin t=30、b=10")
         self.assertEqual(spec["layout"]["xaxis"].get("type"), "category")                         # S-32
         self.assertEqual(spec["layout"]["yaxis"].get("type"), "category")
         texts = figure_texts(spec)
@@ -343,8 +372,60 @@ class HeatmapTests(SafetyHarness, unittest.TestCase):
         self.assertEqual([str(v) for v in table.loc["25 萬"]], ["—"] * 6)                         # D4
         others = [str(table.loc[r, c]) for r in table.index if r != "25 萬" for c in table.columns]
         self.assertTrue(all(PCT.search(v) for v in others))
-        texts = figure_texts(self.heatmap(at))
-        self.assertIn("—", texts)
+        spec = self.heatmap(at)
+        self.assertIn("—", figure_texts(spec))
+        gray = [t for t in spec["data"] if t.get("type") == "heatmap" and t.get("showscale") is False]
+        self.assertEqual(len(gray), 1, "V-01：主熱圖下面多一層灰色熱圖")
+        layer = gray[0]
+        self.assertLess(spec["data"].index(layer), spec["data"].index(self.main_trace(spec)), "V-01：灰色圖層畫在下面")
+        colors = json.dumps(layer.get("colorscale")).lower()
+        self.assertIn(GRAY, colors, "V-01：中性灰底 #a3a29c")
+        self.assertEqual((layer.get("textfont") or {}).get("color", "").lower(), "#0b0b0b", "V-01：字色一定要指定")
+        self.assertIn("—", (layer.get("texttemplate") or "") + json.dumps(layer.get("text"), ensure_ascii=False))
+        self.assertEqual((layer.get("xgap"), layer.get("ygap")), (2, 2))
+        filled = [(i, j) for i, row in enumerate(layer["z"]) for j, v in enumerate(row) if v is not None]
+        self.assertEqual(len(filled), 6, "只有開辦費以下那一列有值")
+        hover = (layer.get("hovertemplate") or "") + json.dumps(layer.get("hovertext"), ensure_ascii=False)
+        self.assertTrue("貸款本金 25 萬 不比開辦費多，無法計算" in hover
+                        or re.search(r"貸款本金 %\{y\} 不比開辦費多，無法計算", hover), f"C-12：{hover}")
+        self.assertIn(DASH_NOTE, shown_all(at.caption), "7.3-3：「—」的說明 caption")
+
+    def test_no_gray_layer_note_without_blocked_cells(self):
+        at, _, _ = self.press(self.start())
+        self.assertNotIn(DASH_NOTE, shown_all(at.caption))
+        spec = self.heatmap(at)
+        for layer in spec["data"]:
+            if layer.get("type") == "heatmap" and layer.get("showscale") is False:
+                self.assertTrue(all(v is None for row in layer["z"] for v in row), "沒有空白格時灰色圖層不應有值")
+
+
+class MapNoteTests(SafetyHarness, unittest.TestCase):
+    """S-39（衝刺 2 修訂）、C-07、C-08：沒有薪水可補時，地圖兩段說明之間多一段。"""
+
+    def notes(self, at):
+        captions = shown_all(at.caption)
+        first = next(i for i, c in enumerate(captions) if c.startswith(MAP_HOW))
+        second = captions.index(MAP_ESTIMATE)
+        return captions, first, second
+
+    def test_normal_case_has_no_extra_note(self):
+        at, _, _ = self.press(self.start())
+        captions, first, second = self.notes(at)
+        self.assertEqual(second, first + 1)
+        self.assertNotIn(C07, captions)
+        self.assertNotIn(C08, captions)
+
+    def test_salary_not_in_the_order(self):
+        at, _, _ = self.press(self.start(**NO_SALARY_ORDER))
+        captions, first, second = self.notes(at)
+        self.assertEqual(captions[first + 1:second], [C07])
+        self.assertNotIn(C08, captions)
+
+    def test_zero_salary_cap(self):
+        at, _, _ = self.press(self.start(salary="0"))
+        captions, first, second = self.notes(at)
+        self.assertEqual(captions[first + 1:second], [C08])
+        self.assertNotIn(C07, captions)
 
 
 class ConclusionTests(SafetyHarness, unittest.TestCase):
@@ -403,8 +484,10 @@ class ConclusionTests(SafetyHarness, unittest.TestCase):
         self.assertBox(at, "success", "以目前其他設定，就算借到搜尋上限 **5,000 萬**，破產機率也只有 1.2%，仍在 5% 以下"
                                       "（你目前設定 500 萬）。")
         self.assertBox(at, "success", "以目前其他設定，就算每月完全不自掏，破產機率也只有 1.0%，仍在 5% 以下。")
-        self.assertIn("這通常代表每月自掏的上限設得很高，幾乎一直有薪水撐著；可以調低「每月最多自掏多少」再算一次。",
-                      self.captions(at))
+        captions = self.captions(at)
+        self.assertIn(C03.format(t="5%"), captions, "C-03")
+        self.assertNotIn(OLD_ALL_MEET, captions, "V-03：舊句作廢")
+        self.assertNotIn("你沒有用薪水補貼還款", captions)
 
     def test_nothing_in_range_meets_the_target(self):
         at = self.run_with((None, 0.083, "none_meet"), (None, 0.072, "none_meet"))
@@ -413,8 +496,28 @@ class ConclusionTests(SafetyHarness, unittest.TestCase):
         self.assertBox(at, "error", "以目前其他設定，就算只借 **10 萬**，破產機率也有 8.3%，達不到 5% 以下。")
         self.assertBox(at, "error", "以目前其他設定，就算每月最多自掏到 **$500,000**，破產機率仍有 7.2%，達不到 5% 以下。")
         captions = self.captions(at)
-        self.assertIn("問題可能不在借多少，而是利率、年限、每月自掏的錢或還款的順序；可以看看下面的地圖。", captions)
+        self.assertIn(C06, captions, "C-06")
+        self.assertNotIn("你沒有用薪水補貼還款", captions)
         self.assertIn("光靠多掏錢救不回來，可以試著降低貸款本金再算一次。", captions)
+
+    def test_no_salary_top_up_explains_the_all_or_nothing_answer(self):
+        # C-04、C-05：薪水沒排進順位（engine.SALARY 不在 source_order），或每月最多自掏為 0。
+        cases = {"自掏上限 0": dict(salary="0"), "薪水沒排進順位": NO_SALARY_ORDER}
+        for name, query in cases.items():
+            with self.subTest(name, status="all_meet"):
+                at = self.run_with(("hi", 0.03, "all_meet"), (0.0, 0.03, "all_meet"), **query)
+                captions = self.captions(at)
+                self.assertIn(C04.format(hi="5,000", lo="10", t="5%"), captions, "C-04")
+                self.assertNotIn(C03.format(t="5%"), captions)
+            with self.subTest(name, status="none_meet"):
+                at = self.run_with((None, 0.2, "none_meet"), (None, 0.2, "none_meet"), **query)
+                captions = self.captions(at)
+                self.assertIn(C05.format(hi="5,000", lo="10", t="5%"), captions, "C-05")
+                self.assertNotIn(C06, captions)
+
+    def test_no_salary_sentence_quotes_the_actual_range(self):
+        at = self.run_with((None, 0.6, "none_meet"), (None, 0.6, "none_meet"), loan="50", lfee="300000", salary="0")
+        self.assertIn(C05.format(hi="500", lo="40", t="5%"), self.captions(at))
 
     def test_lower_limit_raised_by_the_loan_fee_is_quoted(self):
         # PO 補充：「不到 X 萬」與結論句用實際的搜尋下限（開辦費 30 萬 → 40 萬）。
@@ -427,7 +530,7 @@ class ConclusionTests(SafetyHarness, unittest.TestCase):
         self.assertBox(at, "success", "以目前其他設定，要讓破產機率在 10% 以下，最多可以借 **660 萬**（你目前設定 500 萬）。")
 
     def test_salary_not_in_the_repayment_order(self):
-        query = dict(p1="3", p2="5", p3="4", p4="4", p5="4")
+        query = NO_SALARY_ORDER
         with spy_everywhere("solve_for") as solve, spy_everywhere("sensitivity_grid") as grid:
             at = self.start(**query)
             at = self.ok(at.button(key=BUTTON_KEY).click().run())
@@ -468,10 +571,12 @@ class ReportTests(SafetyHarness, unittest.TestCase):
         groups = dict(parts["summaries"])
         self.assertIn(self.GROUP, groups)
         rows = dict(groups[self.GROUP])
-        self.assertEqual(list(rows), ["最多可以借", "借到上限時的破產機率", "每月最少要自掏", "自掏到下限時的破產機率"])
+        self.assertEqual(list(rows), ["最多可以借", "借 660 萬時的破產機率", "每月最少要自掏",
+                                      "每月自掏 $19,000 時的破產機率"])                           # C-09、C-10
         self.assertEqual(rows["最多可以借"], "660 萬（目前 500 萬）")
         self.assertEqual(rows["每月最少要自掏"], "$19,000（目前 $25,000）")
-        self.assertEqual(rows["借到上限時的破產機率"], "4.7%")
+        self.assertEqual(rows["借 660 萬時的破產機率"], "4.7%")
+        self.assertEqual(rows["每月自掏 $19,000 時的破產機率"], "4.7%")
         tables = {h: (frame, note) for h, frame, note in parts["tables"]}
         self.assertIn(MAP_TITLE, tables)
         frame, note = tables[MAP_TITLE]
@@ -491,11 +596,30 @@ class ReportTests(SafetyHarness, unittest.TestCase):
         self.assertEqual(dict(parts["settings"]).get("安全邊界"), "這次沒有計算")
         self.assertFalse(any(group.startswith("安全邊界") for group, _ in parts["summaries"]))
 
-    def test_salary_not_in_the_order_is_reported(self):
+    def rows_for(self, principal, salary_cap, **query):
         rec = Recorder()
-        self.press(self.start(p1="3", p2="5", p3="4", p4="4", p5="4"), rec=rec)
-        rows = dict(dict(rec.last_report()["summaries"])[self.GROUP])
-        self.assertEqual(rows["每月最少要自掏"], "不計算（薪水沒有排進還款順位）")
+        self.press(self.start(**query), solver=fake_solver({"principal": principal, "salary_cap": salary_cap}), rec=rec)
+        return list(dict(dict(rec.last_report()["summaries"])[self.GROUP]).items())
+
+    def test_row_names_follow_the_result(self):
+        # C-09、C-10：第 2、4 列的列名依狀態改變。
+        rows = self.rows_for(("hi", 0.012, "all_meet"), (0.0, 0.01, "all_meet"))
+        self.assertEqual([label for label, _ in rows],
+                         ["最多可以借", "借到 5,000 萬時的破產機率", "每月最少要自掏", "完全不自掏時的破產機率"])
+        self.assertEqual([value for _, value in rows], ["5,000 萬以上", "1.2%", "$0", "1.0%"])
+        rows = self.rows_for((None, 0.083, "none_meet"), (None, 0.072, "none_meet"))
+        self.assertEqual([label for label, _ in rows],
+                         ["最多可以借", "只借 10 萬時的破產機率", "每月最少要自掏", "每月自掏 $500,000 時的破產機率"])
+        self.assertEqual([value for _, value in rows], ["不到 10 萬", "8.3%", "超過 $500,000", "7.2%"])
+        rows = self.rows_for((None, 0.6, "none_meet"), (4_000.0, 0.04, "ok"), loan="50", lfee="300000")
+        self.assertEqual(rows[1], ("只借 40 萬時的破產機率", "60.0%"))
+        self.assertEqual(rows[3][0], "每月自掏 $4,000 時的破產機率")
+
+    def test_salary_not_in_the_order_is_reported(self):
+        rows = self.rows_for((6_600_000.0, 0.0466, "ok"), (19_000.0, 0.0466, "ok"), **NO_SALARY_ORDER)
+        self.assertEqual([label for label, _ in rows], ["最多可以借", "借 660 萬時的破產機率", "每月最少要自掏"],
+                         "C-10：不計算時整列省略")
+        self.assertEqual(dict(rows)["每月最少要自掏"], "不計算（薪水沒有排進還款順位）")
 
 
 if __name__ == "__main__":

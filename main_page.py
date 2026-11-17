@@ -15,7 +15,7 @@ from market_data import (load_history, monthly_data, align_months, backfill_with
                          too_short_error)
 from version import APP_VERSION, SOURCE_URL
 
-LOAN_TYPES = ["理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"]
+LOAN_TYPES = ["理財型房貸（年限長，可設寬限期）", "一般信貸（年限短，通常無寬限期）"]
 # 各貸款類型的預設值：(年利率 %, 年限, 是否預設啟用寬限期)
 LOAN_DEFAULTS = {LOAN_TYPES[0]: (2.5, 20, True), LOAN_TYPES[1]: (3.5, 7, False)}
 
@@ -191,6 +191,8 @@ def show_safety_limit(record, data, params, mc_ok, snapshot, results_stale=False
     figure = safe.map_figure(found)
     st.plotly_chart(figure, width="stretch")
     st.caption(safe.map_note(found))
+    if safe.map_salary_note(found):
+        st.caption(safe.markdown(safe.map_salary_note(found)))
     st.caption(safe.MAP_NOTE_2)
     if safe.has_blank_cells(found):
         st.caption(safe.MAP_NOTE_FEE)
@@ -715,10 +717,12 @@ else:
         active_flags.append(f"槓桿 ETF 震盪耗損（持平的月份每月 -{result.vol_drag*100:.3f}%）")
     if enable_job_loss:
         if job_loss.mode == engine.JOB_LOSS_RANDOM:
-            crash_txt = f" 崩盤(跌>{int(jl_crash_thr*100)}%)加+{int(jl_crash_lo*100)}~{int(jl_crash_hi*100)}%" if jl_crash_on else ""
+            crash_txt = (f"；崩盤（單月跌超過 {jl_crash_thr * 100:.0f}%）時年失業機率再加 "
+                         f"{round(jl_crash_lo * 100, 2):g}～{round(jl_crash_hi * 100, 2):g}%" if jl_crash_on else "")
             dist_name = jl_dist.split("（")[0]
             active_flags.append(
-                f"隨機失業（年率{jl_annual_prob*100:.1f}% 平均{jl_mean_dur:.0f}月/{dist_name} 每月最多自掏${int(job_loss_salary):,}{crash_txt}"
+                f"隨機失業（年失業機率 {jl_annual_prob*100:.1f}%，平均失業 {jl_mean_dur:g} 個月，{dist_name}，"
+                f"每月最多自掏 ${int(job_loss_salary):,}{crash_txt}"
                 f"｜蒙地卡羅中 {result.job_loss_any_rate*100:.1f}% 的路徑失業過，平均失業 {result.job_loss_avg_months:.1f} 個月）")
         else:
             active_flags.append(f"失業或降薪（第 {job_loss_start} 個月起 {job_loss_duration} 個月，每月最多自掏 ${int(job_loss_salary):,}）")

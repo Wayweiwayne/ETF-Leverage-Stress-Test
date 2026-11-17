@@ -15,11 +15,11 @@ def solved(field, status, value, rate, target=0.05):
 
 
 def record(principal=None, salary="default", target="5", grid=None, cur_principal=5_000_000.0, cur_salary=25_000.0,
-           lo=100_000.0, hi=50_000_000.0, paths=2000, seed_is_random=False):
+           lo=100_000.0, hi=50_000_000.0, paths=2000, seed_is_random=False, salary_in_order=True):
     principals, caps = S.map_axes(cur_principal, cur_salary)
     if grid is None:
         grid = pd.DataFrame(0.01, index=principals, columns=caps)
-    return {"target": target, "paths": paths, "seed_is_random": seed_is_random,
+    return {"target": target, "paths": paths, "seed_is_random": seed_is_random, "salary_in_order": salary_in_order,
             "principal": principal or solved("principal", "ok", 6_600_000.0, 0.0495),
             "salary": solved("salary_cap", "ok", 19_000.0, 0.0495) if salary == "default" else salary,
             "lo": lo, "hi": hi, "current_principal": cur_principal, "current_salary": cur_salary, "grid": grid}
@@ -99,11 +99,30 @@ class AnswerTests(unittest.TestCase):
         self.assertEqual((view["value"], view["delta"], view["style"]), ("5,000 萬以上", None, "success"))
         self.assertEqual(view["sentence"], "以目前其他設定，就算借到搜尋上限 **5,000 萬**，破產機率也只有 1.8%，"
                                            "仍在 5% 以下（你目前設定 500 萬）。")
-        self.assertIn("可以調低「每月最多自掏多少」再算一次", view["captions"][0])
+        self.assertEqual(view["captions"], [
+            "借越多，每月還款和買進的資產都會等比例變大，每月自掏那筆固定的錢就越不夠看，所以破產機率不會一直升高，"
+            "而是慢慢接近「完全不自掏」時的水準；這個水準在 5% 以下，所以整個搜尋範圍都達標。"
+            "破產機率低不代表風險小：借越多，一旦出事賠得也越多。"])
 
         view = S.principal_view(record(principal=solved("principal", "none_meet", None, 0.12), lo=200_000.0))
         self.assertEqual((view["value"], view["delta"], view["style"]), ("不到 20 萬", None, "error"))
         self.assertEqual(view["sentence"], "以目前其他設定，就算只借 **20 萬**，破產機率也有 12.0%，達不到 5% 以下。")
+        self.assertEqual(view["captions"], ["問題可能不在借多少，而是利率、年限、每月自掏的錢或還款的順序；可以看看下面的地圖。"])
+
+    def test_without_salary_to_fall_back_on_the_answer_is_one_end_of_the_range(self):
+        why = ("你沒有用薪水補貼還款。這時借多借少，每月還款和買進的資產都等比例變大或變小，破產機率幾乎不變，"
+               "所以「最多可以借」不是「5,000 萬以上」就是「不到 10 萬」，不會落在中間。")
+        for no_salary in (dict(salary_in_order=False), dict(cur_salary=0.0)):
+            view = S.principal_view(record(principal=solved("principal", "all_meet", 5e7, 0.03), **no_salary))
+            self.assertEqual(view["captions"], [why + "這次的破產機率在 5% 以下，所以整個搜尋範圍都達標。"
+                                                      "破產機率低不代表風險小：借越多，一旦出事賠得也越多。"])
+            view = S.principal_view(record(principal=solved("principal", "none_meet", None, 0.2), **no_salary))
+            self.assertEqual(view["captions"], [why + "這次的破產機率超過 5%，調整本金沒有用；要從利率、年限、還款的順序或每月自掏的錢下手。"])
+        self.assertEqual(S.map_salary_note(record(salary_in_order=False, cur_salary=0.0)), S.MAP_NOTE_NO_SALARY)
+        self.assertEqual(S.map_salary_note(record(cur_salary=0.0)), S.MAP_NOTE_ZERO_SALARY)
+        self.assertIsNone(S.map_salary_note(record()))
+        self.assertTrue(S.MAP_NOTE_NO_SALARY.startswith("你沒有把薪水排進還款順位，所以地圖上每一格幾乎都一樣"))
+        self.assertTrue(S.MAP_NOTE_ZERO_SALARY.startswith("你的每月最多自掏是 0，所以最左邊「$0」那一欄上下幾乎都一樣"))
 
     def test_salary_answers(self):
         view = S.salary_view(record())
@@ -129,11 +148,16 @@ class AnswerTests(unittest.TestCase):
     def test_report_rows(self):
         self.assertEqual(S.report_group(record(target="1")), "安全邊界（破產機率 ≤ 1%）")
         self.assertEqual(S.report_rows(record()), [
-            ("最多可以借", "660 萬（目前 500 萬）"), ("借到上限時的破產機率", "4.95%"),
-            ("每月最少要自掏", "$19,000（目前 $25,000）"), ("自掏到下限時的破產機率", "4.95%")])
-        rows = dict(S.report_rows(record(principal=solved("principal", "all_meet", 5e7, 0.01), salary=None)))
-        self.assertEqual(rows["最多可以借"], "5,000 萬以上")
-        self.assertEqual(rows["每月最少要自掏"], "不計算（薪水沒有排進還款順位）")
+            ("最多可以借", "660 萬（目前 500 萬）"), ("借 660 萬時的破產機率", "4.95%"),
+            ("每月最少要自掏", "$19,000（目前 $25,000）"), ("每月自掏 $19,000 時的破產機率", "4.95%")])
+        self.assertEqual(S.report_rows(record(principal=solved("principal", "all_meet", 5e7, 0.01), salary=None)), [
+            ("最多可以借", "5,000 萬以上"), ("借到 5,000 萬時的破產機率", "1.0%"),
+            ("每月最少要自掏", "不計算（薪水沒有排進還款順位）")])
+        self.assertEqual(S.report_rows(record(principal=solved("principal", "none_meet", None, 0.2), lo=200_000.0,
+                                              salary=solved("salary_cap", "all_meet", 0.0, 0.03)))[1:], [
+            ("只借 20 萬時的破產機率", "20.0%"), ("每月最少要自掏", "$0"), ("完全不自掏時的破產機率", "3.0%")])
+        self.assertEqual(S.report_rows(record(salary=solved("salary_cap", "none_meet", None, 0.3)))[2:], [
+            ("每月最少要自掏", "超過 $500,000"), ("每月自掏 $500,000 時的破產機率", "30.0%")])
         note = S.report_table_note(record())
         self.assertIn("最多可以借 660 萬（你目前設定 500 萬）", note)
         self.assertIn("每月最少要能自掏 $19,000", note)
@@ -168,15 +192,25 @@ class MapTests(unittest.TestCase):
         self.assertEqual([c for _, c in heat.colorscale], ["#1c5cab"] * 2 + ["#86b6ef"] * 2 + ["#f0938f"] * 2 + ["#b8322f"] * 2)
         self.assertEqual(heat.hovertemplate,
                          "貸款本金 %{y}｜每月最多自掏 %{x}<br>破產機率 %{customdata}（2,000 次模擬）<extra></extra>")
-        self.assertEqual(fig.layout.height, 440)
+        self.assertEqual((fig.layout.height, fig.layout.margin.t, fig.layout.margin.b), (400, 30, 10))
+        self.assertEqual(len(fig.data), 1)                                    # no grey layer without blank cells
         self.assertEqual(list(S.map_figure(record(target="1")).data[0].colorbar.ticktext)[1], "達標（0.5%–1%）")
 
     def test_cells_that_could_not_be_computed_show_a_dash(self):
         rec = record()
         rec["grid"].iloc[0] = np.nan
         fig = S.map_figure(rec)
-        self.assertEqual(list(fig.data[0].text[0]), ["—"] * 6)
-        self.assertEqual(list(fig.data[0].z[0]), [None] * 6)
+        grey, heat = fig.data                                                  # grey first, so it lies underneath
+        self.assertEqual(list(grey.text[0]), ["—"] * 6)
+        self.assertEqual(list(grey.text[1]), [""] * 6)
+        self.assertEqual(list(grey.z[0]), [0] * 6)
+        self.assertEqual(list(grey.z[1]), [None] * 6)
+        self.assertEqual([c for _, c in grey.colorscale], ["#a3a29c", "#a3a29c"])
+        self.assertEqual((grey.textfont.color, grey.showscale, grey.xgap, grey.ygap), ("#0b0b0b", False, 2, 2))
+        self.assertEqual(grey.hovertemplate, "貸款本金 %{y} 不比開辦費多，無法計算<extra></extra>")
+        self.assertEqual(list(heat.text[0]), [""] * 6)
+        self.assertEqual(list(heat.z[0]), [None] * 6)
+        self.assertFalse(heat.hoverongaps)
         self.assertEqual(list(S.map_table(rec).iloc[0]), ["—"] * 6)
         self.assertTrue(S.has_blank_cells(rec))
         self.assertIn(S.MAP_NOTE_FEE, S.report_table_note(rec))

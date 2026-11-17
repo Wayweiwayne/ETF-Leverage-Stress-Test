@@ -197,6 +197,30 @@ class NamingTests(ScanMixin, AppHarness, unittest.TestCase):
                          "歷史回測：每個月進場，期滿剩多少", "蒙地卡羅：期滿資產的分佈"):        # T-80、T-81
             self.assertIn(expected, joined)
 
+    def test_loan_type_options(self):
+        # DESIGN 7.1、C-01、C-02；網址存的是位置，舊連結 type=0／1 照常運作（另見 OldLinkTests）。
+        new = ["理財型房貸（年限長，可設寬限期）", "一般信貸（年限短，通常無寬限期）"]
+        for link, index in (({}, 1), ({"type": "0"}, 0), ({"type": "1"}, 1)):
+            with self.subTest(**link):
+                with Recorder() as rec:
+                    at = self.start(**link)
+                radio = at.radio(key="type")
+                self.assertEqual(list(radio.options), new)
+                self.assertEqual(radio.index, index)
+                self.assertIn(new[index], dict(rec.last_report()["settings"])["貸款"])
+
+    def test_random_job_loss_is_described_in_full_sentences(self):
+        # DESIGN 7.6 C-11（T-75 修訂）：預設的隨機失業設定（年 5%、平均 5 個月、對數常態、崩盤 15%、加 8～12%）。
+        at = self.start(jl="1", jl_mode="1")
+        page = "\n".join(strip_markup(t).replace("\\$", "$") for _, t in visible_texts(at))
+        self.assertRegex(page, re.escape("隨機失業（年失業機率 5.0%，平均失業 5 個月，對數常態，每月最多自掏 $0；"
+                                         "崩盤（單月跌超過 15%）時年失業機率再加 8～12%｜蒙地卡羅中 ")
+                         + r"\d+(\.\d+)?% 的路徑失業過，平均失業 \d+(\.\d+)? 個月）")
+        at = self.start(jl="1", jl_mode="1", jl_crash="0")
+        page = "\n".join(strip_markup(t).replace("\\$", "$") for _, t in visible_texts(at))
+        self.assertIn("隨機失業（年失業機率 5.0%，平均失業 5 個月，對數常態，每月最多自掏 $0｜蒙地卡羅中 ", page,
+                      "崩盤那段只在有開啟時出現")
+
     def test_csv_columns_and_file_names(self):
         with Recorder() as rec:
             self.start()

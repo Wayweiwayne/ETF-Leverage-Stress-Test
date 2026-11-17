@@ -46,6 +46,18 @@ MAP_NOTE = ("怎麼看這張圖：每一格是「只把貸款本金換成左邊�
             "往上（借越多）、往左（自掏越少）通常越危險。")
 MAP_NOTE_2 = "安全邊界只看蒙地卡羅模擬的破產機率，不看歷史回測。它是用歷史行情重新組合出來的估計，不是保證。"
 MAP_NOTE_FEE = "「—」的格子：貸款本金不比開辦費多，借到的錢扣掉開辦費就沒了，無法計算。"
+MAP_NOTE_NO_SALARY = "你沒有把薪水排進還款順位，所以地圖上每一格幾乎都一樣：借多少、每月自掏多少，都不太影響破產機率。"
+MAP_NOTE_ZERO_SALARY = ("你的每月最多自掏是 0，所以最左邊「$0」那一欄上下幾乎都一樣：不自掏的話，借多少都不太影響破產機率。"
+                        "往右看，是每月補一點錢的效果。")
+BLANK_COLOR, BLANK_TEXT_COLOR = "#a3a29c", "#0b0b0b"
+NO_SUPPORT = ("你沒有用薪水補貼還款。這時借多借少，每月還款和買進的資產都等比例變大或變小，破產機率幾乎不變，"
+              "所以「最多可以借」不是「{hi} 萬以上」就是「不到 {lo} 萬」，不會落在中間。")
+ALL_MEET_SCALES = ("借越多，每月還款和買進的資產都會等比例變大，每月自掏那筆固定的錢就越不夠看，所以破產機率不會一直升高，"
+                   "而是慢慢接近「完全不自掏」時的水準；這個水準在 {t} 以下，所以整個搜尋範圍都達標。")
+ALL_MEET_NO_SUPPORT = "這次的破產機率在 {t} 以下，所以整個搜尋範圍都達標。"
+LOW_IS_NOT_SAFE = "破產機率低不代表風險小：借越多，一旦出事賠得也越多。"
+NONE_MEET_NO_SUPPORT = "這次的破產機率超過 {t}，調整本金沒有用；要從利率、年限、還款的順序或每月自掏的錢下手。"
+NONE_MEET = "問題可能不在借多少，而是利率、年限、每月自掏的錢或還款的順序；可以看看下面的地圖。"
 TABLE_TITLE = "用表格看這張地圖"
 STEPS = ("（1/3）找最多能借多少…", "（2/3）找每月最少要自掏多少…", "（3/3）畫破產機率地圖（{n} 格）…")
 CURRENT_MARK = "◆ 目前"
@@ -96,6 +108,7 @@ def compute(df, params, target, on_step=None):
     if usable:
         grid.loc[usable] = engine.sensitivity_grid(df, params, usable, caps, mc_paths=params.mc_paths).to_numpy()
     return {"target": str(target), "paths": int(params.mc_paths), "seed_is_random": params.seed is None,
+            "salary_in_order": engine.SALARY in params.source_order,
             "principal": principal, "salary": salary, "lo": lo, "hi": hi,
             "current_principal": float(params.principal), "current_salary": float(params.salary_cap), "grid": grid}
 
@@ -137,19 +150,27 @@ def _view(label, value, sentence, style, captions=(), delta=None, delta_color="n
             "style": style, "captions": list(captions)}
 
 
+def has_salary_support(record):
+    """Whether salary can top up payments at all: it is a repayment source and its cap is above zero."""
+    return record["salary_in_order"] and record["current_salary"] > 0
+
+
 def principal_view(record):
     """Metric, sentence (with its alert style) and captions for the most that can be borrowed."""
     res, t = record["principal"], target_text(record["target"])
     cur, r, n = record["current_principal"], ruin_text(record["principal"].ruin_rate, record["target"]), record["paths"]
+    no_support = NO_SUPPORT.format(hi=wan(record["hi"]), lo=wan(record["lo"]))
     if res.status == "all_meet":
+        caption = (ALL_MEET_SCALES.format(t=t) if has_salary_support(record)
+                   else no_support + ALL_MEET_NO_SUPPORT.format(t=t))
         return _view("最多可以借", f"{wan(record['hi'])} 萬以上",
                      f"以目前其他設定，就算借到搜尋上限 **{wan(record['hi'])} 萬**，破產機率也只有 {r}，"
-                     f"仍在 {t} 以下（你目前設定 {wan(cur)} 萬）。", "success",
-                     ["這通常代表每月自掏的上限設得很高，幾乎一直有薪水撐著；可以調低「每月最多自掏多少」再算一次。"])
+                     f"仍在 {t} 以下（你目前設定 {wan(cur)} 萬）。", "success", [caption + LOW_IS_NOT_SAFE])
     if res.status == "none_meet":
+        caption = NONE_MEET if has_salary_support(record) else no_support + NONE_MEET_NO_SUPPORT.format(t=t)
         return _view("最多可以借", f"不到 {wan(record['lo'])} 萬",
                      f"以目前其他設定，就算只借 **{wan(record['lo'])} 萬**，破產機率也有 {r}，達不到 {t} 以下。", "error",
-                     ["問題可能不在借多少，而是利率、年限、每月自掏的錢或還款的順序；可以看看下面的地圖。"])
+                     [caption])
     value, diff = res.value, res.value - cur
     captions = [f"借 {wan(value)} 萬時，破產機率約 {r}（{n:,} 次模擬）。"]
     if cur > value:
@@ -226,15 +247,25 @@ def map_figure(record):
     grid, target = record["grid"], record["target"]
     y_labels, x_labels = _labels(record)
     cells, here = map_cells(record)
-    text = [[cell + (f"<br>{CURRENT_MARK}" if (i, j) == here else "") for j, cell in enumerate(row)]
-            for i, row in enumerate(cells)]
+    blank = grid.isna().to_numpy()
+    text = [["" if blank[i, j] else cell + (f"<br>{CURRENT_MARK}" if (i, j) == here else "")
+             for j, cell in enumerate(row)] for i, row in enumerate(cells)]
     z = [[None if v != v else v for v in row] for row in bands(grid.to_numpy(), target).tolist()]
     scale = []
     for i, color in enumerate(BAND_COLORS):
         scale += [[i / 4, color], [(i + 1) / 4, color]]
-    fig = go.Figure(go.Heatmap(
+    fig = go.Figure()
+    if blank.any():
+        # Its own layer underneath: the theme would otherwise pick a text colour that vanishes on grey.
+        fig.add_trace(go.Heatmap(
+            z=[[0 if b else None for b in row] for row in blank], x=x_labels, y=y_labels, zmin=0, zmax=1,
+            colorscale=[[0, BLANK_COLOR], [1, BLANK_COLOR]], showscale=False, xgap=2, ygap=2, hoverongaps=False,
+            text=[["—" if b else "" for b in row] for row in blank], texttemplate="%{text}",
+            textfont=dict(color=BLANK_TEXT_COLOR),
+            hovertemplate="貸款本金 %{y} 不比開辦費多，無法計算<extra></extra>"))
+    fig.add_trace(go.Heatmap(
         z=z, x=x_labels, y=y_labels, zmin=-0.5, zmax=3.5, colorscale=scale, text=text, texttemplate="%{text}",
-        customdata=cells, xgap=2, ygap=2,
+        customdata=cells, xgap=2, ygap=2, hoverongaps=False,
         hovertemplate=(f"貸款本金 %{{y}}｜每月最多自掏 %{{x}}<br>破產機率 %{{customdata}}（{record['paths']:,} 次模擬）"
                        "<extra></extra>"),
         colorbar=dict(title=dict(text="破產機率"), tickvals=[0, 1, 2, 3], ticktext=_band_ticks(target))))
@@ -243,7 +274,7 @@ def map_figure(record):
         for color, width in (("#ffffff", 6), ("#0b0b0b", 2.5)):
             fig.add_shape(type="rect", x0=j - 0.5, x1=j + 0.5, y0=i - 0.5, y1=i + 0.5, layer="above",
                           line=dict(color=color, width=width))
-    fig.update_layout(xaxis_title="每月最多自掏（元）", yaxis_title="貸款本金", height=440)
+    fig.update_layout(xaxis_title="每月最多自掏（元）", yaxis_title="貸款本金", height=400, margin=dict(t=30, b=10))
     fig.update_xaxes(type="category")
     fig.update_yaxes(type="category")
     return fig
@@ -265,6 +296,15 @@ def has_blank_cells(record):
     return bool(record["grid"].isna().to_numpy().any())
 
 
+def map_salary_note(record):
+    """Why the map hardly changes when there is no salary to fall back on; None otherwise."""
+    if not record["salary_in_order"]:
+        return MAP_NOTE_NO_SALARY
+    if record["current_salary"] == 0:
+        return MAP_NOTE_ZERO_SALARY
+    return None
+
+
 # ---- report ----
 
 def report_group(record):
@@ -274,22 +314,24 @@ def report_group(record):
 def report_rows(record):
     res, target = record["principal"], record["target"]
     if res.status == "all_meet":
-        most = f"{wan(record['hi'])} 萬以上"
+        most, at = f"{wan(record['hi'])} 萬以上", f"借到 {wan(record['hi'])} 萬時的破產機率"
     elif res.status == "none_meet":
-        most = f"不到 {wan(record['lo'])} 萬"
+        most, at = f"不到 {wan(record['lo'])} 萬", f"只借 {wan(record['lo'])} 萬時的破產機率"
     else:
         most = f"{wan(res.value)} 萬（目前 {wan(record['current_principal'])} 萬）"
-    rows = [("最多可以借", most), ("借到上限時的破產機率", ruin_text(res.ruin_rate, target))]
+        at = f"借 {wan(res.value)} 萬時的破產機率"
+    rows = [("最多可以借", most), (at, ruin_text(res.ruin_rate, target))]
     sal = record["salary"]
     if sal is None:
-        return rows + [("每月最少要自掏", "不計算（薪水沒有排進還款順位）"), ("自掏到下限時的破產機率", "—")]
+        return rows + [("每月最少要自掏", "不計算（薪水沒有排進還款順位）")]
     if sal.status == "all_meet":
-        least = dollars(0)
+        least, at = dollars(0), "完全不自掏時的破產機率"
     elif sal.status == "none_meet":
-        least = f"超過 {dollars(SALARY_HI)}"
+        least, at = f"超過 {dollars(SALARY_HI)}", f"每月自掏 {dollars(SALARY_HI)} 時的破產機率"
     else:
         least = f"{dollars(sal.value)}（目前 {dollars(record['current_salary'])}）"
-    return rows + [("每月最少要自掏", least), ("自掏到下限時的破產機率", ruin_text(sal.ruin_rate, target))]
+        at = f"每月自掏 {dollars(sal.value)} 時的破產機率"
+    return rows + [("每月最少要自掏", least), (at, ruin_text(sal.ruin_rate, target))]
 
 
 def report_table_note(record):
