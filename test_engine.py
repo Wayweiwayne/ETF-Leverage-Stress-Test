@@ -1057,17 +1057,20 @@ class SolveForTests(unittest.TestCase):
         self.assertEqual(res.ruin_rate, mc_ruin(self.df, self.p, salary_cap=0.0))
 
     def test_nothing_in_range_meets_the_target(self):
-        poor = dataclasses.replace(self.p, salary_cap=0.0)
-        res = E.solve_for(self.df, poor, "principal", 0.05, 1_000_000.0, 30_000_000.0, 1_000_000.0)
+        poor = dataclasses.replace(self.p, salary_cap=10_000.0)
+        smallest, largest = (mc_ruin(self.df, poor, principal=v) for v in (8_000_000.0, 30_000_000.0))
+        self.assertTrue(0.05 < smallest < largest)
+        res = E.solve_for(self.df, poor, "principal", 0.05, 8_000_000.0, 30_000_000.0, 1_000_000.0)
         self.assertEqual((res.status, res.value), ("none_meet", None))
         # The rate reported is that of the end closest to meeting the target: the smallest loan.
-        self.assertEqual(res.ruin_rate, mc_ruin(self.df, poor, principal=1_000_000.0))
-        self.assertGreater(res.ruin_rate, 0.05)
+        self.assertEqual(res.ruin_rate, smallest)
         self.assertEqual(res.evaluations, 2)
         big = dataclasses.replace(self.p, principal=50_000_000.0)
+        least, most = (mc_ruin(self.df, big, salary_cap=v) for v in (0.0, 50_000.0))
+        self.assertTrue(least > most > 0.01)
         res = E.solve_for(self.df, big, "salary_cap", 0.01, 0.0, 50_000.0, 1_000.0)
         self.assertEqual((res.status, res.value), ("none_meet", None))
-        self.assertEqual(res.ruin_rate, mc_ruin(self.df, big, salary_cap=50_000.0))
+        self.assertEqual(res.ruin_rate, most)
         self.assertEqual(res.evaluations, 2)
 
     def test_answer_is_a_grid_point_counted_from_lo(self):

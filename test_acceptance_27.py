@@ -196,7 +196,7 @@ class SolvePrincipalTests(ContractChecks, unittest.TestCase):
 
     def test_hi_off_the_grid_that_fails_returns_a_grid_point(self):
         p = harsh()
-        lo, hi, step = 1_000_000.0, 4_250_000.0, 500_000.0
+        lo, hi, step = 1_000_000.0, 4_750_000.0, 500_000.0  # 格點到 450 萬，475 萬本身不達標
         status, value, _, _ = brute_force(self.df, p, "principal", 0.05, lo, hi, step)
         self.assertEqual((status, value), ("ok", 4_000_000.0), "測試前提")
         res = self.solve(self.df, p, "principal", 0.05, lo, hi, step)
@@ -295,8 +295,8 @@ class SolveSalaryCapTests(ContractChecks, unittest.TestCase):
         self.assertEqual((res.status, res.value), ("all_meet", 40_000.0))
 
     def test_zero_lo_is_allowed_and_can_be_the_answer(self):
-        p = harsh(principal=1_000_000.0)
-        self.assertEqual(ruin(self.df, p, salary_cap=0.0), 0.0, "測試前提")
+        p = params(mc_paths=300)  # 沒有額外扣報酬的設定，完全不自掏也幾乎不會破產
+        self.assertLessEqual(ruin(self.df, p, salary_cap=0.0), 0.05, "測試前提")
         res = self.solve(self.df, p, "salary_cap", 0.05, 0.0, 50_000.0, 1_000.0)
         self.assertEqual((res.status, res.value), ("all_meet", 0.0))
 
