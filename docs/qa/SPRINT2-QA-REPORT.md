@@ -103,3 +103,61 @@
 3. **熱圖的預設路徑數**：`sensitivity_grid` 的預設 `mc_paths=1000` 仍保留（SPEC 4.1 沒有改，驗收測試也還在檢查）。D6 是由畫面傳入 `params.mc_paths` 來達成，已經驗證過。如果 PO 希望連函式的預設值也改掉，需要更新 SPEC 4.1 和這個測試。
 4. **UI/UX 的文案修改**：設計審查可能會改少數文案（PO 補充第 4 點）。驗收測試是用 DESIGN 的確切文字比對的，文案定案後 QA 會同步更新對應的測試。
 5. **單機版效能**（D9：30 秒內）：本環境無法在瀏覽器裡執行單機版，仍待使用者協助量測。
+
+---
+
+## 6. 修正輪（設計審查後，DESIGN-v40 第 7 節）
+
+- 日期：2026-11-17
+- 受測對象：工作目錄中 RD 的修正（`main_page.py`、`safety_limit.py` 13:16 修改；單機檔 13:17 重新產生）
+- 依據：DESIGN-v40 第 7 節（V-01～V-07、C-01～C-13）、PO 對衝刺 2 問題的決定
+
+### 6.1 結果
+
+| 項目 | 結果 |
+|---|---|
+| `test_acceptance_27`（計算核心） | 42 個全部通過（不需修改：PO 決定 `sensitivity_grid` 預設仍是 1000） |
+| `test_acceptance_27_ui` | 40 個全部通過（原本 33 個，新增 7 個，另外修改 5 個） |
+| `test_acceptance_38` | 13 個全部通過（原本 11 個，新增 2 個） |
+| `.venv/bin/python -m unittest`（全部） | 427 個全部通過（約 253 秒） |
+| `pyflakes *.py pages/*.py` | 沒有警告 |
+| `build_standalone.py --check` | 單機檔是最新的 |
+
+DEF-2-01、DEF-2-02 已修正並驗證，可以關閉。修正輪沒有新的缺陷。
+
+### 6.2 驗收測試的修改（測試先行，依 7.6 的確切文案）
+
+| 設計編號 | 測試 |
+|---|---|
+| V-06（DEF-2-01） | `test_figure`：熱圖 `height == 400`、`margin.t == 30`、`margin.b == 10`；主熱圖改用「有色標的那一層」判斷 |
+| V-01（DEF-2-02）、C-12、7.3-3 | `test_cells_at_or_below_the_loan_fee_show_a_dash`：灰色圖層只有一層，畫在主熱圖下面，`showscale=False`；colorscale 含 `#a3a29c`；`textfont.color == "#0b0b0b"`；文字「—」；`xgap/ygap = 2`；只有開辦費以下那 6 格有值；hover 是「貸款本金 25 萬 不比開辦費多，無法計算」；有「—」的說明 caption。另新增 `test_no_gray_layer_note_without_blocked_cells` |
+| V-03、C-03、C-06 | all_meet 的一般情況是 C-03，舊句不再出現；none_meet 的一般情況是 C-06 |
+| V-07、C-04、C-05 | 新增 `test_no_salary_top_up_explains_the_all_or_nothing_answer`：自掏上限 0 和薪水沒排進順位，各自檢查 all_meet → C-04、none_meet → C-05，並確認 C-03／C-06 不出現；另新增 `test_no_salary_sentence_quotes_the_actual_range`（開辦費 30 萬時 {lo}=40、{hi}=500） |
+| S-39 修訂、C-07、C-08 | 新增 `MapNoteTests` 3 個：一般情況兩段說明相連；薪水沒排進順位時只多 C-07、自掏為 0 時只多 C-08，而且都在兩段之間 |
+| V-02、C-09、C-10 | 報告第 2、4 列的列名依 ok／all_meet／none_meet 改變（含開辦費下限 40 萬）；薪水沒排進順位時省略第 4 列 |
+| V-04、C-01、C-02 | 新增 `test_loan_type_options`：選項文字、預設是信貸、舊連結 `type=0`／`1` 對應正確，報告的「貸款」列用新文字（另外 5 組 V39 舊連結的回歸仍然通過） |
+| V-05、C-11 | 新增 `test_random_job_loss_is_described_in_full_sentences`：完整句型；關閉「崩盤時失業率同步飆升」時，不出現崩盤那段 |
+
+### 6.3 瀏覽器實機（埠 8602，真實行情，用完已關閉）
+
+截圖：`/tmp/claude-0/-home-user-ETF-Leverage-Stress-Test/d9762379-1ffe-5f59-9687-fb97862f21dd/scratchpad/qa/r2/`
+
+| 檢查 | 截圖 | 結果 |
+|---|---|---|
+| 熱圖間距（V-06） | `default_light_section.png`、`default_dark_section.png` | 小標題到第一列格子約 55px（修正前約 130px），滑鼠移上去時的工具列不會蓋到格子 |
+| 「—」格子（V-01） | `fee_light_heatmap.png`、`fee_dark_heatmap.png`、`fee_*_below.png` | 中灰底、黑色「—」，在淺色與深色主題都看得出是一列格子；下方有「「—」的格子：…無法計算。」說明 |
+| 沒有薪水可補（C-05、C-08） | `nosalary_dark_section.png`、`nosalary_light_below.png` | 本金欄顯示 C-05；地圖兩段說明之間有 C-08；目前格在「$0」那一欄 |
+| 貸款種類（C-01、C-02） | 各截圖的側欄 | 新選項文字，在側欄裡折成兩行（7.1 第 5 點已說可以接受） |
+
+### 6.4 缺陷狀態
+
+| 編號 | 嚴重度 | 狀態 |
+|---|---|---|
+| DEF-2-01 熱圖上方空白 | 輕微 | 已修正，驗證通過（V-06） |
+| DEF-2-02 「—」格子看不清楚 | 輕微 | 已修正，驗證通過（V-01） |
+
+### 6.5 其他
+
+- 開辦費使破產率到 100% 的情況，依 PO 決定不另外說明，沒有寫測試。
+- 主標題目前仍是 (V39)，依 PO 補充，版號在發布時才改；測試比對的是 `APP_VERSION`。
+- 單機版效能（D9：30 秒內）仍待使用者在瀏覽器量測。
