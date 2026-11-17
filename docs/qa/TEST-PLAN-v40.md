@@ -3,7 +3,7 @@
 - 文件負責人：QA
 - 依據：`docs/specs/SPEC-v40.md`（以下簡稱 SPEC）、`docs/design/DESIGN-v40.md`（UI/UX 產出後補對照）
 - 適用版本：V40（四個衝刺）
-- 狀態：衝刺 1 版本（第 27 項計算核心的驗收測試已完成；其他故事的自動測試在對應衝刺撰寫）
+- 狀態：衝刺 2 版本（第 27 項計算核心與畫面、第 38 項的驗收測試已完成：`test_acceptance_27.py`、`test_acceptance_27_ui.py`、`test_acceptance_38.py`，共用工具在 `test_acceptance_helpers.py`；驗收紀錄見 `docs/qa/SPRINT1-QA-REPORT.md`、`docs/qa/SPRINT2-QA-REPORT.md`）
 
 ## 1. 目的與範圍
 
@@ -47,7 +47,7 @@
 | 衝刺 | QA 工作 | 產出 |
 |---|---|---|
 | 1 | 本測試計畫；第 27 項計算核心驗收測試（測試先行）；RD 完成後執行並回報 | `docs/qa/TEST-PLAN-v40.md`、`test_acceptance_27.py`、`docs/qa/` 底下的缺陷報告（若有） |
-| 2 | 第 27 項畫面＋第 38 項的 App 驗收測試；瀏覽器實機 | `test_acceptance_27_ui.py`、`test_acceptance_38.py`、實機檢查紀錄 |
+| 2 | 第 27 項畫面＋第 38 項的 App 驗收測試；依 D1、D2、D5 更新計算核心測試；瀏覽器實機 | `test_acceptance_27_ui.py`、`test_acceptance_38.py`、`docs/qa/SPRINT2-QA-REPORT.md`（含截圖清單） |
 | 3 | 第 35 項驗收測試（含計數 mock）；實機 | `test_acceptance_35.py` |
 | 4 | 第 39 項驗收測試（中日韓文字掃描）；實機；全版本回歸 | `test_acceptance_39.py`、V40 驗收總結 |
 

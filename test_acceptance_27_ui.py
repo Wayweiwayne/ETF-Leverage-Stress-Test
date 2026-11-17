@@ -260,11 +260,11 @@ class SearchRangeTests(SafetyHarness, unittest.TestCase):
         self.assertRange(calls["principal"], 0.05, 400_000.0, 5_000_000.0, 100_000.0)
 
     def test_loan_fee_that_is_not_a_round_amount(self):
-        # D4「開辦費 + 10 萬，取到 10 萬的倍數」：150,000 + 100,000 = 250,000。往上取是 30 萬、往下取是 20 萬；
-        # 兩種都大於開辦費，這裡只要求是 10 萬的倍數、大於開辦費（取法待 PO 確認）。
-        _, _, calls, _ = self.solve_for_link(lfee="150000")
-        lo = float(calls["principal"][1])
-        self.assertIn(lo, (200_000.0, 300_000.0))
+        # PO 補充：下限 = (開辦費 + 10 萬) 無條件捨去到 10 萬，也就是比開辦費大的最小 10 萬倍數。
+        for fee, lo in (("6000", 100_000.0), ("150000", 200_000.0), ("199000", 200_000.0)):
+            with self.subTest(fee=fee):
+                _, _, calls, _ = self.solve_for_link(lfee=fee)
+                self.assertEqual(float(calls["principal"][1]), lo)
 
     def test_uses_the_same_settings_and_paths_as_the_main_result(self):
         for query in ({}, {"paths": "1"}, {"seed": "0"}, {"type": "0", "jl": "1", "swan": "1"}):
@@ -415,6 +415,12 @@ class ConclusionTests(SafetyHarness, unittest.TestCase):
         captions = self.captions(at)
         self.assertIn("問題可能不在借多少，而是利率、年限、每月自掏的錢或還款的順序；可以看看下面的地圖。", captions)
         self.assertIn("光靠多掏錢救不回來，可以試著降低貸款本金再算一次。", captions)
+
+    def test_lower_limit_raised_by_the_loan_fee_is_quoted(self):
+        # PO 補充：「不到 X 萬」與結論句用實際的搜尋下限（開辦費 30 萬 → 40 萬）。
+        at = self.run_with((None, 0.6, "none_meet"), (4_000.0, 0.04, "ok"), loan="50", lfee="300000")
+        self.assertEqual(self.metric(at, "最多可以借")[0], "不到 40 萬")
+        self.assertBox(at, "error", "以目前其他設定，就算只借 **40 萬**，破產機率也有 60.0%，達不到 5% 以下。")
 
     def test_sentence_uses_the_chosen_target(self):
         at = self.run_with((6_600_000.0, 0.09, "ok"), (19_000.0, 0.09, "ok"), tgt="10")
