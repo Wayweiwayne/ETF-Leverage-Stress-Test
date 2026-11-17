@@ -10,7 +10,8 @@ import engine
 import report
 import ui_state as ui
 from market_data import (load_history, monthly_data, align_months, backfill_with_proxy, normalize_ticker,
-                         request_live, live_source_available, available_snapshots, listing_info)
+                         request_live, live_source_available, available_snapshots, listing_info,
+                         too_short_error)
 from version import APP_VERSION, SOURCE_URL
 
 LOAN_TYPES = ["理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"]
@@ -416,9 +417,9 @@ params = engine.SimParams(
 # 2. 行情資料
 # ==========================================
 @st.cache_data(ttl=3600, max_entries=64)
-def fetch_pure_asset_data(ticker, pay_day, repair):
+def fetch_pure_asset_data(ticker, pay_day, repair, allow_short=False):
     # Exceptions propagate so unsuccessful requests are never cached.
-    return monthly_data(load_history(ticker), pay_day, repair=repair)
+    return monthly_data(load_history(ticker), pay_day, repair=repair, allow_short=allow_short)
 
 
 @st.cache_data(ttl=3600, max_entries=32, show_spinner="模擬計算中…")
@@ -436,7 +437,8 @@ def prepare_unified_data(t_a, t_b, t_proxy, pay_day, repair):
     try:
         t_a = normalize_ticker(t_a)
         t_b = normalize_ticker(t_b) if t_b else ""
-        feeds = {t_a: fetch_pure_asset_data(t_a, pay_day, repair)}
+        # A just-listed main asset may have a single month of prices; a proxy can still fill in the rest.
+        feeds = {t_a: fetch_pure_asset_data(t_a, pay_day, repair, allow_short=True)}
         df_a, proxy_problem = feeds[t_a], ""
         if t_proxy and t_proxy != t_a:
             try:
@@ -444,6 +446,8 @@ def prepare_unified_data(t_a, t_b, t_proxy, pay_day, repair):
                 df_a = backfill_with_proxy(df_a, feeds[t_proxy])
             except ValueError as exc:
                 proxy_problem = str(exc)
+        if df_a.empty:
+            raise too_short_error(t_a, feeds[t_a].attrs['source_start'], feeds[t_a].attrs['base_month'])
         if t_b:
             feeds[t_b] = fetch_pure_asset_data(t_b, pay_day, repair)
         merged = align_months(df_a, feeds.get(t_b))
@@ -573,9 +577,8 @@ else:
     official = listing_info(symbol_a).get("listed", "")
     listed_txt = f"（證交所公告的上市日是 {official}）" if official else ""
     if backfill:
-        first_own = pd.Period(backfill['end'], freq='M') + 1
-        data_note(f"📅 最早可以從 {data.index[0]:%Y-%m} 進場：{symbol_a} 從 {first_own} 才有自己的資料{listed_txt}，"
-                  f"在那之前的 {backfill['months']} 個月，用替身 {backfill['proxy']} 當時的實際漲跌與配息補上。")
+        data_note(f"📅 最早可以從 {data.index[0]:%Y-%m} 進場：{symbol_a} 的第一筆價格在 {feeds[symbol_a].attrs['source_start']}"
+                  f"{listed_txt}，在那之前的 {backfill['months']} 個月，用替身 {backfill['proxy']} 當時的實際漲跌與配息補上。")
     else:
         data_note(f"📅 最早只能從 {data.index[0]:%Y-%m} 進場：{symbol_a} 的第一筆價格在 {feeds[symbol_a].attrs['source_start']}"
                   f"{listed_txt}，在那之前沒有資料。想測更早的行情（例如 2008 年），可以在側欄「上市前的歷史用哪一檔代替」"

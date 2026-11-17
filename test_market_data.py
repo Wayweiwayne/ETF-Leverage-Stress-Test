@@ -931,6 +931,28 @@ class BackfillTests(unittest.TestCase):
         self.assertEqual(info['overlap_months'], 24)
         self.assertTrue(-1 <= info['correlation'] <= 1)
 
+    def test_just_listed_asset_with_one_month_of_prices(self):
+        days = pd.bdate_range('2022-01-11', '2022-01-20')
+        raw = pd.DataFrame({'Close': np.linspace(10, 11, len(days)), 'Dividends': 0.0}, index=days)
+        raw.attrs['ticker'] = 'NEW.TW'
+        with self.assertRaises(ValueError) as ctx:
+            monthly_data(raw, 10)
+        self.assertIn("NEW.TW 的第一筆價格在 2022-01-11", str(ctx.exception))
+        self.assertIn("最早要等到 2022-02 有了第二筆月價才能進場", str(ctx.exception))
+
+        short = monthly_data(raw, 10, allow_short=True)
+        self.assertTrue(short.empty)
+        self.assertEqual((short.attrs['base_month'], short.attrs['base_close']), ('2022-01', 10.0))
+
+        out = backfill_with_proxy(short, self.proxy)
+        self.assertTrue(out['Synthetic'].all())
+        self.assertEqual(out.index[-1], pd.Period('2022-01', freq='M'))      # the asset's own price month
+        self.assertAlmostEqual(out['Close'].iloc[-1], 10.0)                   # anchored on its real price
+        pd.testing.assert_series_equal(out['Price_Return'], self.proxy.loc[out.index, 'Price_Return'])
+        self.assertEqual(out.attrs['backfill']['months'], len(out))
+        merged = align_months(out)
+        self.assertEqual(len(merged), len(out))
+
     def test_proxy_that_is_no_older_changes_nothing(self):
         out = backfill_with_proxy(self.proxy, self.asset)
         self.assertFalse(out['Synthetic'].any())

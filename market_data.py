@@ -630,7 +630,7 @@ def find_anomalies(df, limit=5):
 # ------------------------------------------------------------------
 # Monthly series
 # ------------------------------------------------------------------
-def monthly_data(df, pay_day, repair=True):
+def monthly_data(df, pay_day, repair=True, allow_short=False):
     """One row per calendar month, priced on the first trading day on or after `pay_day`.
 
     A dividend belongs to the period in which the price went ex-dividend: the first monthly
@@ -676,9 +676,10 @@ def monthly_data(df, pay_day, repair=True):
     monthly['Monthly_Div'] = monthly_div
     monthly['Price_Return'] = monthly['Close'].pct_change(fill_method=None)
     monthly['Div_Yield'] = monthly['Monthly_Div'] / monthly['Close'].shift(1)
+    base_month, base_close = monthly.index[0], float(monthly['Close'].iloc[0])
     monthly = monthly.dropna(subset=['Price_Return'])
-    if monthly.empty:
-        raise ValueError("至少需要兩個月份的價格才能計算月報酬。")
+    if monthly.empty and not allow_short:
+        raise too_short_error(source.get('ticker', '') or "這檔標的", df.index.min(), base_month)
 
     rich = monthly['Div_Yield'] > _DIVIDEND_YIELD_CEILING
     anomalies += [f"{m} 配息相當於股價的 {y:.1%}" for m, y in monthly.loc[rich, 'Div_Yield'].items()]
@@ -696,8 +697,18 @@ def monthly_data(df, pay_day, repair=True):
         source_end=df.index.max().strftime('%Y-%m-%d'),
         repairs=repairs,
         anomalies=anomalies,
+        base_month=str(base_month),
+        base_close=base_close,
     )
     return monthly
+
+
+def too_short_error(ticker, first_day, base_month):
+    """Why a history with a single month of prices cannot be tested yet, and what can be done."""
+    return ValueError(
+        f"{ticker} 的第一筆價格在 {pd.Timestamp(first_day):%Y-%m-%d}，目前只有一個月份的價格，還無法計算月報酬；"
+        f"沒有指定替身時，最早要等到 {pd.Period(base_month, freq='M') + 1} 有了第二筆月價才能進場。"
+        "如果想現在就測試，可以在側欄「上市前的歷史用哪一檔代替」指定一檔上市更久的 ETF，用它的舊資料補上。")
 
 
 def backfill_with_proxy(asset, proxy):
@@ -710,14 +721,16 @@ def backfill_with_proxy(asset, proxy):
     """
     asset = asset.copy()
     asset['Synthetic'] = False
-    first = asset.index[0]
-    earlier = proxy[proxy.index < first]
-    if earlier.empty or earlier.index[-1] != first - 1:
+    # The asset's first price month: before its first return, or its only month when it has none yet.
+    base = pd.Period(asset.attrs['base_month'], freq='M') if 'base_month' in asset.attrs else asset.index[0] - 1
+    earlier = proxy[proxy.index <= base]
+    if earlier.empty or earlier.index[-1] != base:
         return asset
 
     returns = earlier['Price_Return'].to_numpy()
     close = np.empty(len(earlier))
-    close[-1] = asset['Close'].iloc[0] / (1 + asset['Price_Return'].iloc[0])
+    close[-1] = (asset.attrs['base_close'] if 'base_close' in asset.attrs
+                 else asset['Close'].iloc[0] / (1 + asset['Price_Return'].iloc[0]))
     for i in range(len(earlier) - 1, 0, -1):
         close[i - 1] = close[i] / (1 + returns[i])
     previous_close = close / (1 + returns)
@@ -735,7 +748,7 @@ def backfill_with_proxy(asset, proxy):
     overlap = asset[['Price_Return']].join(proxy[['Price_Return']], rsuffix='_proxy', how='inner')
     correlation = float(overlap.corr().iloc[0, 1]) if len(overlap) >= 12 else float('nan')
 
-    out = pd.concat([filled, asset[filled.columns]])
+    out = pd.concat([filled, asset[filled.columns]]) if not asset.empty else filled
     out.attrs = dict(asset.attrs)
     out.attrs['backfill'] = {
         'proxy': proxy.attrs.get('ticker', ''),
