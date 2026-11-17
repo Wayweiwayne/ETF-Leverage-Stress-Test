@@ -12,7 +12,11 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+
+try:
+    import yfinance as yf
+except ImportError:  # the in-browser build has no live source: only stored copies and the mirror
+    yf = None
 
 from version import SOURCE_URL
 
@@ -150,7 +154,29 @@ def read_snapshot(ticker):
     return None
 
 
+IN_BROWSER = sys.platform == "emscripten"
+
+
+def live_source_available():
+    return yf is not None
+
+
+def available_snapshots():
+    """Tickers the app can load without the live source: shipped snapshots and the mirror list."""
+    names = set()
+    if os.path.isdir(SEED_DIR):
+        names |= {f[:-4] for f in os.listdir(SEED_DIR) if f.endswith(".csv")}
+    listing = os.path.join(_HERE, "data", "mirror_tickers.txt")
+    if os.path.exists(listing):
+        with open(listing, encoding="utf-8") as fh:
+            names |= {line.split("#")[0].strip() for line in fh if line.split("#")[0].strip()}
+    return sorted(names)
+
+
 def _http_get_text(url, timeout=8):
+    if IN_BROWSER:  # no sockets in the browser; a synchronous request from the worker instead
+        from pyodide.http import open_url
+        return open_url(url).read()
     request = urllib.request.Request(url, headers={"User-Agent": "etf-stress-test"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read().decode("utf-8")
@@ -352,7 +378,7 @@ def load_history(ticker):
     last_error = None
     # Fetch prices and corporate actions together; a failed dividend request
     # must not silently turn an income strategy into a zero-dividend strategy.
-    for attempt in range(3):
+    for attempt in range(3 if yf is not None else 0):
         try:
             kwargs = {"period": "max"} if attempt < 2 else {"start": "1900-01-01"}
             df = yf.Ticker(ticker).history(
@@ -379,6 +405,11 @@ def load_history(ticker):
             return top_up_from_twse(snapshot, ticker)
         except Exception:
             return snapshot  # a stale but whole snapshot beats a half-merged one
+    if yf is None:
+        raise ValueError(
+            f"這個版本無法即時查詢行情，只能使用預先存好的標的，沒有 {ticker} 的資料。"
+            f"可以使用的標的：{'、'.join(available_snapshots())}。"
+            "要查詢其他代號，請使用網頁版或在電腦上執行完整版。")
     raise ValueError(
         f"暫時無法取得 {ticker} 的完整歷史資料（已嘗試 3 次），也沒有先前存檔的資料可用。"
         "這不代表代號不存在，也可能是來源暫時異常或限制連線；"

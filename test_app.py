@@ -292,6 +292,13 @@ class AppTests(unittest.TestCase):
             self.start()
         spy.assert_not_called()
 
+    def test_standalone_notice_appears_only_without_a_live_source(self):
+        self.assertNotIn("這是單機版", self.texts(self.start().info))
+        with patch('market_data.yf', None):
+            at = self.start()
+        self.assertIn("這是單機版", self.texts(at.info))
+        self.assertIn("00878.TW", self.texts(at.info))
+
     def test_data_origin_and_download_date_are_shown(self):
         captions = self.texts(self.start().caption)
         self.assertIn("資料取得時間 2024-12-31（剛從 Yahoo Finance 取得）", captions)

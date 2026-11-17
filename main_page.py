@@ -10,7 +10,7 @@ import engine
 import report
 import ui_state as ui
 from market_data import (load_history, monthly_data, align_months, backfill_with_proxy, normalize_ticker,
-                         request_live)
+                         request_live, live_source_available, available_snapshots)
 from version import APP_VERSION, SOURCE_URL
 
 LOAN_TYPES = ["理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"]
@@ -124,6 +124,10 @@ ui.begin()
 
 st.title(f"槓桿與利差套利：主動再配置與 DCA 對決引擎 ({APP_VERSION})")
 st.caption("📖 每個欄位旁的問號是白話說明；想看完整公式與模型，點側邊欄最上方的「計算模型詳細說明」頁面。")
+if not live_source_available():
+    st.info("📦 這是單機版：在瀏覽器裡直接執行，不需要安裝任何東西，但無法即時查詢行情，"
+            "只能使用預先存好、每天自動更新的標的：" + "、".join(available_snapshots()) + "。"
+            "要查詢其他代號，請使用網頁版。")
 
 # ==========================================
 # 1. 參數設定

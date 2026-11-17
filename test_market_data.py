@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -558,6 +559,54 @@ class FreshCopyTests(IsolatedSnapshots):
         with tempfile.TemporaryDirectory() as out:
             self.assertEqual(market_data.refresh_snapshots(['0056.TW'], out), 0)
             self.assertEqual(os.listdir(out), [])
+
+
+class WithoutLiveSourceTests(IsolatedSnapshots):
+    """The in-browser build: no yfinance, so only stored copies and the mirror."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(market_data, "yf", None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_stored_copy_of_any_age_is_used(self):
+        save_snapshot(copy_fetched(500), '0056.TW', self.seed_dir)
+        out = load_history('0056.TW')
+        self.assertEqual(out.attrs['data_source'], 'snapshot')
+        self.assertFalse(market_data.live_source_available())
+
+    def test_unknown_ticker_explains_what_is_available(self):
+        save_snapshot(copy_fetched(500), '0056.TW', self.seed_dir)
+        with patch.object(market_data, "_HERE", os.path.dirname(self.seed_dir)), \
+                patch.object(market_data, "time") as clock:
+            clock.monotonic.return_value = 0.0
+            with self.assertRaises(ValueError) as ctx:
+                load_history('2330.TW')
+            clock.sleep.assert_not_called()                     # no pointless retries
+        self.assertIn("無法即時查詢行情", str(ctx.exception))
+        self.assertIn("0056.TW", str(ctx.exception))
+
+    def test_reload_request_falls_back_to_stored_copies(self):
+        save_snapshot(copy_fetched(500), '0056.TW', self.seed_dir)
+        market_data.request_live('0056.TW')
+        self.assertEqual(load_history('0056.TW').attrs['data_source'], 'snapshot')
+
+    def test_available_tickers_combine_shipped_files_and_the_mirror_list(self):
+        root = os.path.dirname(self.seed_dir)
+        os.makedirs(os.path.join(root, "data"))
+        with open(os.path.join(root, "data", "mirror_tickers.txt"), "w") as fh:
+            fh.write("# list\n00878.TW\n0056.TW  # dup\n")
+        save_snapshot(copy_fetched(1), '0050.TW', self.seed_dir)
+        with patch.object(market_data, "_HERE", root):
+            self.assertEqual(market_data.available_snapshots(), ['0050.TW', '0056.TW', '00878.TW'])
+
+    def test_browser_uses_its_own_http_client(self):
+        fake = unittest.mock.MagicMock()
+        fake.http.open_url.return_value.read.return_value = "text"
+        with patch.object(market_data, "IN_BROWSER", True), patch.dict(sys.modules, {"pyodide": fake, "pyodide.http": fake.http}):
+            self.assertEqual(market_data._http_get_text("https://example.test/a.csv"), "text")
+        fake.http.open_url.assert_called_once_with("https://example.test/a.csv")
 
 
 def roc(ts, style="/"):
