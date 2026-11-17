@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+import market_data
 from version import APP_VERSION
 
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
@@ -21,7 +22,8 @@ def fake_history(ticker):
     OLD* reaches back to 2006, SEAM* carries an unadjusted 4-for-1 split, STALE* arrives from a snapshot.
     """
     rng = np.random.RandomState(sum(map(ord, ticker)))
-    days = pd.bdate_range('2006-01-02' if ticker.startswith('OLD') else '2016-01-04', '2024-12-31')
+    start = {'OLD': '2006-01-02', 'NEW': '2024-12-16'}.get(ticker[:3], '2016-01-04')
+    days = pd.bdate_range(start, '2024-12-31')
     leverage = 2.0 if 'L' in ticker else 1.0
     close = 20 * np.cumprod(1 + rng.normal(0.0004 * leverage, 0.011 * leverage, len(days)))
     dividends = np.zeros(len(days))
@@ -42,6 +44,10 @@ def fake_history(ticker):
 class AppTests(unittest.TestCase):
     def setUp(self):
         st.cache_data.clear()
+        patcher = patch('market_data.MIRROR_URL', '')         # no network: no mirror, no index
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        market_data._index_cache.update(at=float("-inf"), entries=None)
         patcher = patch('market_data.load_history', side_effect=fake_history)
         self.load_history = patcher.start()
         self.addCleanup(patcher.stop)
@@ -291,6 +297,40 @@ class AppTests(unittest.TestCase):
         with patch('report.build_report', wraps=report.build_report) as spy:
             self.start()
         spy.assert_not_called()
+
+    def test_standalone_notice_appears_only_without_a_live_source(self):
+        self.assertNotIn("這是單機版", self.texts(self.start().info))
+        index = {f"00{n:03d}.TW": {"name": f"ETF {n}", "listed": "2020-01-01"} for n in range(247)}
+        with patch('market_data.yf', None), patch('market_data.mirror_index', return_value=index), \
+                patch('market_data._listed_extras', return_value=set()):
+            at = self.start()
+        self.assertIn("可以使用所有台灣上市的 ETF（目前 247 檔", self.texts(at.info))
+
+    def test_earliest_entry_month_is_explained_without_a_proxy(self):
+        index = {"00878.TW": {"name": "國泰永續高股息", "listed": "2016-01-04"}}
+        with patch('market_data.mirror_index', return_value=index):
+            at = self.start(proxy="")
+        captions = self.texts(at.caption)
+        self.assertIn("📅 最早只能從 2016-02 進場：00878.TW 的第一筆價格在 2016-01-04", captions)
+        self.assertIn("（證交所公告的上市日是 2016-01-04）", captions)
+        self.assertIn("指定一檔上市更久的 ETF，用它的舊資料補上", captions)
+
+    def test_just_listed_etf_needs_a_proxy_or_has_to_wait(self):
+        alone = self.start(a="NEW.TW", proxy="")
+        self.assertEqual(len(alone.metric), 0)
+        self.assertIn("NEW.TW 的第一筆價格在 2024-12-16，目前只有一個月份的價格", self.texts(alone.error))
+        self.assertIn("最早要等到 2025-01 有了第二筆月價才能進場", self.texts(alone.error))
+
+        helped = self.start(a="NEW.TW", proxy="OLD.TW")
+        self.assertEqual(len(helped.error), 0)
+        self.assertIn("槓桿破產率 (現金流斷裂)", [m.label for m in helped.metric])
+        self.assertIn("📅 最早可以從 2006-02 進場：NEW.TW 的第一筆價格在 2024-12-16", self.texts(helped.caption))
+
+    def test_earliest_entry_month_is_explained_with_a_proxy(self):
+        captions = self.texts(self.start(proxy="OLD.TW").caption)
+        self.assertIn("📅 最早可以從 2006-02 進場：00878.TW 的第一筆價格在 2016-01-04，"
+                      "在那之前的 120 個月，用替身 OLD.TW 當時的實際漲跌與配息補上。", captions)
+        self.assertNotIn("證交所公告的上市日", captions)                 # no index available in tests
 
     def test_data_origin_and_download_date_are_shown(self):
         captions = self.texts(self.start().caption)

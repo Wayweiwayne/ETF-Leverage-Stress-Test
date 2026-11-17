@@ -12,7 +12,11 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+
+try:
+    import yfinance as yf
+except ImportError:  # the in-browser build has no live source: only stored copies and the mirror
+    yf = None
 
 from version import SOURCE_URL
 
@@ -33,6 +37,12 @@ MIRROR_URL = os.environ.get(
 SNAPSHOT_MAX_AGE_HOURS = 36
 _MIRROR_MISS_SECONDS = 3600
 _mirror_misses = {}
+# The mirror also publishes index.csv: every ticker it carries, with its name and listing date.
+INDEX_FILE = "index.csv"
+_index_cache = {"at": float("-inf"), "entries": None}
+# Official list of every ETF listed on the Taiwan Stock Exchange (market 1 = listed, issue type I = ETF).
+LISTED_ETF_URL = ("https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode="
+                  "&market=1&issuetype=I&industry_code=&Page=1&chklike=Y")
 _live_requests = set()
 _state_lock = threading.Lock()
 
@@ -150,10 +160,122 @@ def read_snapshot(ticker):
     return None
 
 
+IN_BROWSER = sys.platform == "emscripten"
+
+
+def live_source_available():
+    return yf is not None
+
+
+def _listed_extras():
+    names = set()
+    if os.path.isdir(SEED_DIR):
+        names |= {f[:-4] for f in os.listdir(SEED_DIR) if f.endswith(".csv")}
+    listing = os.path.join(_HERE, "data", "mirror_tickers.txt")
+    if os.path.exists(listing):
+        with open(listing, encoding="utf-8") as fh:
+            names |= {line.split("#")[0].strip() for line in fh if line.split("#")[0].strip()}
+    return names
+
+
+def available_snapshots():
+    """Tickers the app can load without the live source: the mirror's index when it can be read,
+    otherwise the shipped snapshots and the extra list."""
+    index = mirror_index()
+    return sorted(set(index) | _listed_extras()) if index else sorted(_listed_extras())
+
+
 def _http_get_text(url, timeout=8):
+    if IN_BROWSER:  # no sockets in the browser; a synchronous request from the worker instead
+        from pyodide.http import open_url
+        return open_url(url).read()
     request = urllib.request.Request(url, headers={"User-Agent": "etf-stress-test"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read().decode("utf-8")
+
+
+def parse_index(text):
+    """index.csv -> {ticker: {"name": ..., "listed": ...}}."""
+    frame = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
+    if "ticker" not in frame.columns:
+        raise ValueError("清單格式不正確")
+    return {row["ticker"]: {"name": row.get("name", ""), "listed": row.get("listed", "")}
+            for _, row in frame.iterrows() if row["ticker"]}
+
+
+def write_index(entries, directory):
+    """Write {ticker: {"name", "listed"}} as index.csv, sorted by ticker."""
+    rows = [{"ticker": t, "name": e.get("name", ""), "listed": e.get("listed", "")} for t, e in sorted(entries.items())]
+    path = os.path.join(directory, INDEX_FILE)
+    os.makedirs(directory, exist_ok=True)
+    pd.DataFrame(rows, columns=["ticker", "name", "listed"]).to_csv(path, index=False)
+    return path
+
+
+def mirror_index():
+    """The mirror's index of tickers it carries, or {} when it cannot be read. Cached for an hour."""
+    if not MIRROR_URL:
+        return {}
+    with _state_lock:
+        if time.monotonic() - _index_cache["at"] < _MIRROR_MISS_SECONDS:
+            return dict(_index_cache["entries"] or {})
+    try:
+        entries = parse_index(_http_get_text(f"{MIRROR_URL}/{INDEX_FILE}"))
+    except (OSError, ValueError):
+        entries = {}
+    with _state_lock:
+        _index_cache.update(at=time.monotonic(), entries=entries)
+    return dict(entries)
+
+
+def listing_info(ticker):
+    """Name and official listing date of a ticker when the mirror's index knows it, else {}."""
+    return mirror_index().get(normalize_ticker(ticker), {})
+
+
+def parse_listed_etfs(html):
+    """The exchange's ETF listing page -> {ticker: {"name", "listed"}} for listed ('上市') ETFs."""
+    entries = {}
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S | re.I):
+        cells = [re.sub(r"<[^>]+>|&nbsp;", "", c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S | re.I)]
+        if len(cells) < 8 or cells[4] != "上市" or cells[5] != "ETF":
+            continue
+        code = cells[2].upper()
+        if re.fullmatch(r"[0-9A-Z]{4,8}", code):
+            entries[f"{code}.TW"] = {"name": cells[3], "listed": cells[7].replace("/", "-")}
+    return entries
+
+
+def fetch_listed_etfs(attempts=5, pause=40):
+    """Every ETF listed on the Taiwan Stock Exchange, from the exchange's own list.
+
+    Its firewall turns away a share of ordinary requests from cloud hosts with a short HTML page,
+    so a refusal is retried after a pause. Raises if every attempt is refused or the list is empty.
+    """
+    last = None
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(pause)
+        try:
+            request = urllib.request.Request(LISTED_ETF_URL, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(request, timeout=90) as response:
+                raw = response.read()
+        except OSError as exc:
+            last = exc
+            continue
+        for encoding in ("utf-8", "cp950"):
+            try:
+                html = raw.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            html = raw.decode("cp950", errors="replace")
+        entries = parse_listed_etfs(html)
+        if len(entries) >= 50:          # a refusal page, or a page cut short, has none or very few
+            return entries
+        last = ValueError(f"清單只有 {len(entries)} 檔，可能被拒絕或不完整")
+    raise ConnectionError(f"無法取得上市 ETF 清單：{last}")
 
 
 def fetch_mirror(ticker):
@@ -352,7 +474,7 @@ def load_history(ticker):
     last_error = None
     # Fetch prices and corporate actions together; a failed dividend request
     # must not silently turn an income strategy into a zero-dividend strategy.
-    for attempt in range(3):
+    for attempt in range(3 if yf is not None else 0):
         try:
             kwargs = {"period": "max"} if attempt < 2 else {"start": "1900-01-01"}
             df = yf.Ticker(ticker).history(
@@ -379,6 +501,11 @@ def load_history(ticker):
             return top_up_from_twse(snapshot, ticker)
         except Exception:
             return snapshot  # a stale but whole snapshot beats a half-merged one
+    if yf is None:
+        known = available_snapshots()
+        raise ValueError(
+            f"單機版無法即時查詢行情，只能使用台灣上市的 ETF（目前 {len(known)} 檔，每天自動更新），沒有 {ticker} 的資料。"
+            "請確認代號是否正確，例如 0056.TW、00878.TW。要測試其他商品，請使用網頁版。")
     raise ValueError(
         f"暫時無法取得 {ticker} 的完整歷史資料（已嘗試 3 次），也沒有先前存檔的資料可用。"
         "這不代表代號不存在，也可能是來源暫時異常或限制連線；"
@@ -503,7 +630,7 @@ def find_anomalies(df, limit=5):
 # ------------------------------------------------------------------
 # Monthly series
 # ------------------------------------------------------------------
-def monthly_data(df, pay_day, repair=True):
+def monthly_data(df, pay_day, repair=True, allow_short=False):
     """One row per calendar month, priced on the first trading day on or after `pay_day`.
 
     A dividend belongs to the period in which the price went ex-dividend: the first monthly
@@ -549,9 +676,10 @@ def monthly_data(df, pay_day, repair=True):
     monthly['Monthly_Div'] = monthly_div
     monthly['Price_Return'] = monthly['Close'].pct_change(fill_method=None)
     monthly['Div_Yield'] = monthly['Monthly_Div'] / monthly['Close'].shift(1)
+    base_month, base_close = monthly.index[0], float(monthly['Close'].iloc[0])
     monthly = monthly.dropna(subset=['Price_Return'])
-    if monthly.empty:
-        raise ValueError("至少需要兩個月份的價格才能計算月報酬。")
+    if monthly.empty and not allow_short:
+        raise too_short_error(source.get('ticker', '') or "這檔標的", df.index.min(), base_month)
 
     rich = monthly['Div_Yield'] > _DIVIDEND_YIELD_CEILING
     anomalies += [f"{m} 配息相當於股價的 {y:.1%}" for m, y in monthly.loc[rich, 'Div_Yield'].items()]
@@ -569,8 +697,18 @@ def monthly_data(df, pay_day, repair=True):
         source_end=df.index.max().strftime('%Y-%m-%d'),
         repairs=repairs,
         anomalies=anomalies,
+        base_month=str(base_month),
+        base_close=base_close,
     )
     return monthly
+
+
+def too_short_error(ticker, first_day, base_month):
+    """Why a history with a single month of prices cannot be tested yet, and what can be done."""
+    return ValueError(
+        f"{ticker} 的第一筆價格在 {pd.Timestamp(first_day):%Y-%m-%d}，目前只有一個月份的價格，還無法計算月報酬；"
+        f"沒有指定替身時，最早要等到 {pd.Period(base_month, freq='M') + 1} 有了第二筆月價才能進場。"
+        "如果想現在就測試，可以在側欄「上市前的歷史用哪一檔代替」指定一檔上市更久的 ETF，用它的舊資料補上。")
 
 
 def backfill_with_proxy(asset, proxy):
@@ -583,14 +721,16 @@ def backfill_with_proxy(asset, proxy):
     """
     asset = asset.copy()
     asset['Synthetic'] = False
-    first = asset.index[0]
-    earlier = proxy[proxy.index < first]
-    if earlier.empty or earlier.index[-1] != first - 1:
+    # The asset's first price month: before its first return, or its only month when it has none yet.
+    base = pd.Period(asset.attrs['base_month'], freq='M') if 'base_month' in asset.attrs else asset.index[0] - 1
+    earlier = proxy[proxy.index <= base]
+    if earlier.empty or earlier.index[-1] != base:
         return asset
 
     returns = earlier['Price_Return'].to_numpy()
     close = np.empty(len(earlier))
-    close[-1] = asset['Close'].iloc[0] / (1 + asset['Price_Return'].iloc[0])
+    close[-1] = (asset.attrs['base_close'] if 'base_close' in asset.attrs
+                 else asset['Close'].iloc[0] / (1 + asset['Price_Return'].iloc[0]))
     for i in range(len(earlier) - 1, 0, -1):
         close[i - 1] = close[i] / (1 + returns[i])
     previous_close = close / (1 + returns)
@@ -608,7 +748,7 @@ def backfill_with_proxy(asset, proxy):
     overlap = asset[['Price_Return']].join(proxy[['Price_Return']], rsuffix='_proxy', how='inner')
     correlation = float(overlap.corr().iloc[0, 1]) if len(overlap) >= 12 else float('nan')
 
-    out = pd.concat([filled, asset[filled.columns]])
+    out = pd.concat([filled, asset[filled.columns]]) if not asset.empty else filled
     out.attrs = dict(asset.attrs)
     out.attrs['backfill'] = {
         'proxy': proxy.attrs.get('ticker', ''),
@@ -650,14 +790,16 @@ def align_months(df_a, df_b=None):
     return merged
 
 
-def refresh_snapshots(tickers, directory):
+def refresh_snapshots(tickers, directory, pause=0.2):
     """Download each ticker from the live source into `directory`. Returns how many came back live.
 
     A ticker the live source refuses keeps its newest stored copy, so one bad day does not drop
     it from the published set.
     """
     live = 0
-    for symbol in tickers:
+    for position, symbol in enumerate(tickers):
+        if position and pause:
+            time.sleep(pause)
         try:
             request_live(symbol)
             history = load_history(symbol)
@@ -670,18 +812,44 @@ def refresh_snapshots(tickers, directory):
     return live
 
 
+def mirror_universe(extra):
+    """What the daily refresh publishes: every listed ETF plus `extra`, as {ticker: {"name", "listed"}}.
+
+    When the exchange's list cannot be fetched, the previously published index stands in, so a
+    bad day does not shrink the set.
+    """
+    try:
+        entries = fetch_listed_etfs()
+        print(f"listed ETFs from the exchange: {len(entries)}")
+    except ConnectionError as exc:
+        entries = mirror_index()
+        print(f"{exc}; using the previously published index ({len(entries)} tickers)")
+    for symbol in extra:
+        entries.setdefault(normalize_ticker(symbol), {"name": "", "listed": ""})
+    return entries
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Download market-data snapshots from the live source.")
     parser.add_argument("tickers", nargs="*", help="Yahoo Finance symbols, e.g. 0050.TW 0056.TW")
     parser.add_argument("--file", help="text file with one symbol per line (# starts a comment)")
+    parser.add_argument("--listed-etfs", action="store_true",
+                        help="also every ETF listed on the Taiwan Stock Exchange, and write index.csv")
     parser.add_argument("--dir", default=SEED_DIR, help="folder to write to (default: data/snapshots)")
     cli = parser.parse_args()
     symbols = list(cli.tickers)
     if cli.file:
         with open(cli.file, encoding="utf-8") as fh:
             symbols += [line.split("#")[0].strip() for line in fh if line.split("#")[0].strip()]
+    if cli.listed_etfs:
+        universe = mirror_universe(symbols)
+        symbols = sorted(universe)
     if not symbols:
         parser.error("no tickers given")
-    sys.exit(0 if refresh_snapshots(symbols, cli.dir) else 1)
+    succeeded = refresh_snapshots(symbols, cli.dir)
+    if cli.listed_etfs:
+        published = {t: e for t, e in universe.items() if os.path.exists(os.path.join(cli.dir, f"{t}.csv"))}
+        print(f"index: {len(published)} tickers -> {write_index(published, cli.dir)}")
+    sys.exit(0 if succeeded else 1)

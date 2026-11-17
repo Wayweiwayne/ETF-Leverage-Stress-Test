@@ -10,7 +10,8 @@ import engine
 import report
 import ui_state as ui
 from market_data import (load_history, monthly_data, align_months, backfill_with_proxy, normalize_ticker,
-                         request_live)
+                         request_live, live_source_available, available_snapshots, listing_info,
+                         too_short_error)
 from version import APP_VERSION, SOURCE_URL
 
 LOAN_TYPES = ["理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"]
@@ -124,6 +125,10 @@ ui.begin()
 
 st.title(f"槓桿與利差套利：主動再配置與 DCA 對決引擎 ({APP_VERSION})")
 st.caption("📖 每個欄位旁的問號是白話說明；想看完整公式與模型，點側邊欄最上方的「計算模型詳細說明」頁面。")
+if not live_source_available():
+    st.info(f"📦 這是單機版：在瀏覽器裡直接執行，不需要安裝任何東西。可以使用所有台灣上市的 ETF"
+            f"（目前 {len(available_snapshots())} 檔，每天自動更新），代號請加上 .TW，例如 0056.TW。"
+            "無法即時查詢上市 ETF 以外的商品，要測試其他代號請使用網頁版。")
 
 # ==========================================
 # 1. 參數設定
@@ -412,9 +417,9 @@ params = engine.SimParams(
 # 2. 行情資料
 # ==========================================
 @st.cache_data(ttl=3600, max_entries=64)
-def fetch_pure_asset_data(ticker, pay_day, repair):
+def fetch_pure_asset_data(ticker, pay_day, repair, allow_short=False):
     # Exceptions propagate so unsuccessful requests are never cached.
-    return monthly_data(load_history(ticker), pay_day, repair=repair)
+    return monthly_data(load_history(ticker), pay_day, repair=repair, allow_short=allow_short)
 
 
 @st.cache_data(ttl=3600, max_entries=32, show_spinner="模擬計算中…")
@@ -432,7 +437,8 @@ def prepare_unified_data(t_a, t_b, t_proxy, pay_day, repair):
     try:
         t_a = normalize_ticker(t_a)
         t_b = normalize_ticker(t_b) if t_b else ""
-        feeds = {t_a: fetch_pure_asset_data(t_a, pay_day, repair)}
+        # A just-listed main asset may have a single month of prices; a proxy can still fill in the rest.
+        feeds = {t_a: fetch_pure_asset_data(t_a, pay_day, repair, allow_short=True)}
         df_a, proxy_problem = feeds[t_a], ""
         if t_proxy and t_proxy != t_a:
             try:
@@ -440,6 +446,8 @@ def prepare_unified_data(t_a, t_b, t_proxy, pay_day, repair):
                 df_a = backfill_with_proxy(df_a, feeds[t_proxy])
             except ValueError as exc:
                 proxy_problem = str(exc)
+        if df_a.empty:
+            raise too_short_error(t_a, feeds[t_a].attrs['source_start'], feeds[t_a].attrs['base_month'])
         if t_b:
             feeds[t_b] = fetch_pure_asset_data(t_b, pay_day, repair)
         merged = align_months(df_a, feeds.get(t_b))
@@ -566,6 +574,15 @@ else:
         caution(f"⚠️ 「未來平均一年發多少股息」設為 {base_div_yield * 100:.1f}%，但 {symbol_a} 最近 {min(60, len(own_yield))} 個月實際平均約 {recent_yield * 100:.1f}%"
                    f"（全部歷史平均 {float(own_yield.mean() * 12) * 100:.1f}%）。{uses_assumed_yield}，配息是照你設的數字算的，"
                    "差距這麼大會直接影響結果，請確認這是你想測試的假設。")
+    official = listing_info(symbol_a).get("listed", "")
+    listed_txt = f"（證交所公告的上市日是 {official}）" if official else ""
+    if backfill:
+        data_note(f"📅 最早可以從 {data.index[0]:%Y-%m} 進場：{symbol_a} 的第一筆價格在 {feeds[symbol_a].attrs['source_start']}"
+                  f"{listed_txt}，在那之前的 {backfill['months']} 個月，用替身 {backfill['proxy']} 當時的實際漲跌與配息補上。")
+    else:
+        data_note(f"📅 最早只能從 {data.index[0]:%Y-%m} 進場：{symbol_a} 的第一筆價格在 {feeds[symbol_a].attrs['source_start']}"
+                  f"{listed_txt}，在那之前沒有資料。想測更早的行情（例如 2008 年），可以在側欄「上市前的歷史用哪一檔代替」"
+                  "指定一檔上市更久的 ETF，用它的舊資料補上。")
     if n_months < SHORT_HISTORY_MONTHS:
         hint = ("可以在側欄「上市前的歷史用哪一檔代替」填一檔性質相近、上市更久的標的（例如 0056.TW 或 0050.TW）。"
                 if not backfill else "")

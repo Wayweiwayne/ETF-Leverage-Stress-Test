@@ -1,4 +1,4 @@
-# ETF 槓桿與利差套利：壓力測試引擎 (V38)
+# ETF 槓桿與利差套利：壓力測試引擎 (V39)
 
 > 借錢投資，撐得住每月還款嗎？——一個以「破產風險」為核心的槓桿投資壓力測試系統。
 
@@ -60,6 +60,15 @@
 | 數值運算 | NumPy, pandas |
 | 視覺化 | Plotly |
 
+## 單機版（單一 HTML 檔）
+
+[`dist/ETF-Leverage-Stress-Test.html`](dist/ETF-Leverage-Stress-Test.html) 是把整個 App 打包成的單一檔案：下載後用瀏覽器打開就能用，不需要安裝 Python。
+
+- 第一次打開需要連網，下載約 30 MB 的 Python 執行環境（[stlite](https://github.com/whitphx/stlite)／Pyodide），之後瀏覽器會快取。
+- 計算全部在你的電腦上進行。
+- 可以使用所有台灣上市的 ETF（每天自動更新）；上市 ETF 以外的商品要用網頁版。連不上存檔時，改用檔案內建的 8 檔常用 ETF。
+- 程式碼更新後要重新產生：`python build_standalone.py`（測試會檢查這個檔案是否過期）。
+
 ## 本機執行
 
 ```bash
@@ -85,6 +94,7 @@ streamlit run app.py
 | `main_page.py` | 主頁畫面：收集參數、呼叫引擎、畫圖表。 |
 | `ui_state.py` | 輸入元件的預設值、上下限與網址同步。 |
 | `report.py` | 產生可下載的 HTML 報告。 |
+| `build_standalone.py` | 把整個 App 打包成單一 HTML 檔（`dist/`）。 |
 | `pages/1_Model_Details.py` | 公式與模型假設說明頁。 |
 | `app.py` | 進入點與頁面導覽。 |
 | `version.py` | 版本號。更新內容見 [CHANGELOG.md](CHANGELOG.md)。 |

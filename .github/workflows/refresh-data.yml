@@ -1,7 +1,8 @@
 name: refresh market data
 
-# Downloads the tickers in data/mirror_tickers.txt once a day and publishes them on the
-# market-data branch, where the app reads them instead of asking Yahoo Finance on every visit.
+# Downloads every ETF listed on the Taiwan Stock Exchange, plus the tickers in data/mirror_tickers.txt,
+# once a day and publishes them with an index on the market-data branch. The app reads them instead
+# of asking Yahoo Finance on every visit; the single-file version can only use these.
 # The branch holds a single commit that is replaced each run, so the repository does not grow.
 
 on:
@@ -19,6 +20,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,13 +30,14 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Download from the live source
         # A ticker that fails keeps its previously published copy; the step fails only if none succeed.
-        run: python market_data.py --file data/mirror_tickers.txt --dir published
+        run: python market_data.py --listed-etfs --file data/mirror_tickers.txt --dir published
       - name: Publish
         working-directory: published
         run: |
           printf '%s\n' \
             '# Market data snapshots' '' \
-            'Raw daily history from Yahoo Finance for the tickers in `data/mirror_tickers.txt` on the main branch.' \
+            'Raw daily history from Yahoo Finance for every ETF listed on the Taiwan Stock Exchange, plus the' \
+            'tickers in `data/mirror_tickers.txt` on the main branch. `index.csv` lists them with name and listing date.' \
             'Replaced every day by the "refresh market data" workflow; the app reads these files instead of' \
             'contacting Yahoo Finance on every visit. The data belongs to its original source and is not covered' \
             "by the project's licence." > README.md

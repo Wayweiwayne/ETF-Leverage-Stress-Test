@@ -1,4 +1,4 @@
-# ETF Leverage & Carry Stress-Test Engine (V38)
+# ETF Leverage & Carry Stress-Test Engine (V39)
 
 > You borrowed to invest. Can you keep making the monthly payment? A stress-testing tool for leveraged investing, built around the risk of running out of cash.
 
@@ -62,6 +62,15 @@ The screenshots use this scenario, which you can reproduce by appending it to th
 | Numerics | NumPy, pandas |
 | Charts | Plotly |
 
+## Single-file version
+
+[`dist/ETF-Leverage-Stress-Test.html`](dist/ETF-Leverage-Stress-Test.html) is the whole app in one file: download it and open it in a browser, no Python needed.
+
+- The first visit needs an internet connection to download about 30 MB of Python runtime ([stlite](https://github.com/whitphx/stlite) on Pyodide); the browser caches it afterwards.
+- All calculations run on your own computer.
+- Every ETF listed on the Taiwan Stock Exchange is available, refreshed daily; anything else needs the web version. Eight common ETFs are embedded in the file as a fallback.
+- Rebuild it after changing the code: `python build_standalone.py` (a test fails when it is out of date).
+
 ## Run locally
 
 ```bash
@@ -87,6 +96,7 @@ The app opens at `http://localhost:8501`.
 | `main_page.py` | The main page: collects inputs, calls the engine, draws the charts. |
 | `ui_state.py` | Input defaults, bounds and URL synchronisation. |
 | `report.py` | Builds the downloadable HTML report. |
+| `build_standalone.py` | Packs the whole app into one HTML file (`dist/`). |
 | `pages/1_Model_Details.py` | Formulas and model assumptions. |
 | `app.py` | Entry point and page navigation. |
 | `version.py` | Version label. Changes are listed in [CHANGELOG.md](CHANGELOG.md) (in Chinese). |

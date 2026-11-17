@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -62,6 +63,7 @@ class IsolatedSnapshots(unittest.TestCase):
             self.addCleanup(patcher.stop)
         market_data._mirror_misses.clear()
         market_data._live_requests.clear()
+        market_data._index_cache.update(at=float("-inf"), entries=None)
         # No test may reach the exchange; those about it replace this with canned answers.
         patcher = patch.object(market_data, "_twse_get", side_effect=ConnectionError("no network in tests"))
         self.twse_get = patcher.start()
@@ -560,6 +562,141 @@ class FreshCopyTests(IsolatedSnapshots):
             self.assertEqual(os.listdir(out), [])
 
 
+class WithoutLiveSourceTests(IsolatedSnapshots):
+    """The in-browser build: no yfinance, so only stored copies and the mirror."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(market_data, "yf", None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_stored_copy_of_any_age_is_used(self):
+        save_snapshot(copy_fetched(500), '0056.TW', self.seed_dir)
+        out = load_history('0056.TW')
+        self.assertEqual(out.attrs['data_source'], 'snapshot')
+        self.assertFalse(market_data.live_source_available())
+
+    def test_unknown_ticker_explains_what_is_available(self):
+        # (falls back to the shipped files when the mirror's index cannot be read)
+        save_snapshot(copy_fetched(500), '0056.TW', self.seed_dir)
+        with patch.object(market_data, "_HERE", os.path.dirname(self.seed_dir)), \
+                patch.object(market_data, "time") as clock:
+            clock.monotonic.return_value = 0.0
+            with self.assertRaises(ValueError) as ctx:
+                load_history('2330.TW')
+            clock.sleep.assert_not_called()                     # no pointless retries
+        self.assertIn("單機版無法即時查詢行情，只能使用台灣上市的 ETF（目前 1 檔", str(ctx.exception))
+
+    def test_reload_request_falls_back_to_stored_copies(self):
+        save_snapshot(copy_fetched(500), '0056.TW', self.seed_dir)
+        market_data.request_live('0056.TW')
+        self.assertEqual(load_history('0056.TW').attrs['data_source'], 'snapshot')
+
+    def test_available_tickers_combine_shipped_files_and_the_mirror_list(self):
+        root = os.path.dirname(self.seed_dir)
+        os.makedirs(os.path.join(root, "data"))
+        with open(os.path.join(root, "data", "mirror_tickers.txt"), "w") as fh:
+            fh.write("# list\n00878.TW\n0056.TW  # dup\n")
+        save_snapshot(copy_fetched(1), '0050.TW', self.seed_dir)
+        with patch.object(market_data, "_HERE", root):
+            self.assertEqual(market_data.available_snapshots(), ['0050.TW', '0056.TW', '00878.TW'])
+
+    def test_browser_uses_its_own_http_client(self):
+        fake = unittest.mock.MagicMock()
+        fake.http.open_url.return_value.read.return_value = "text"
+        with patch.object(market_data, "IN_BROWSER", True), patch.dict(sys.modules, {"pyodide": fake, "pyodide.http": fake.http}):
+            self.assertEqual(market_data._http_get_text("https://example.test/a.csv"), "text")
+        fake.http.open_url.assert_called_once_with("https://example.test/a.csv")
+
+
+LISTING_PAGE = """<html><body><table>
+<tr><td>頁面編號</td><td>國際證券編碼</td><td>有價證券代號</td><td>有價證券名稱</td><td>市場別</td><td>有價證券別</td>
+<td>產業別</td><td>公開發行/上市(櫃)/發行日</td><td>CFICode</td><td>備註</td></tr>
+<tr><td>1</td><td>TW0000050004</td><td>0050</td><td>元大台灣50</td><td>上市</td><td>ETF</td><td></td><td>2003/06/30</td><td>CEOGEU</td><td></td></tr>
+<tr><td>2</td><td>TW00000631L5</td><td>00631L</td><td>元大台灣50正2</td><td>上市</td><td>ETF</td><td></td><td>2014/10/31</td><td>CEOGLU</td><td></td></tr>
+<tr><td>3</td><td>TW00000679B0</td><td>00679B</td><td>元大美債20年</td><td>上櫃</td><td>ETF</td><td></td><td>2017/01/17</td><td>CEOIBU</td><td></td></tr>
+<tr><td>4</td><td>TW0002330008</td><td>2330</td><td>台積電</td><td>上市</td><td>股票</td><td>24</td><td>1994/09/05</td><td>ESVUFR</td><td></td></tr>
+<tr><td>5</td><td>TW00000413A2</td><td>00413a</td><td>主動玉山&nbsp;關鍵科技</td><td>上市</td><td>ETF</td><td></td><td>2026/11/11</td><td>CEOJEU</td><td></td></tr>
+</table></body></html>"""
+
+
+class ListedEtfTests(IsolatedSnapshots):
+    def test_listing_page_yields_listed_etfs_only(self):
+        entries = market_data.parse_listed_etfs(LISTING_PAGE)
+        self.assertEqual(entries, {
+            "0050.TW": {"name": "元大台灣50", "listed": "2003-06-30"},
+            "00631L.TW": {"name": "元大台灣50正2", "listed": "2014-10-31"},
+            "00413A.TW": {"name": "主動玉山關鍵科技", "listed": "2026-11-11"},
+        })
+
+    def respond(self, body, encoding="cp950"):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = body.encode(encoding)
+        return response
+
+    def full_page(self, count=60):
+        rows = "".join(f"<tr><td>{i}</td><td>X</td><td>{9000 + i}</td><td>ETF {i}</td><td>上市</td><td>ETF</td><td></td>"
+                       f"<td>2020/01/01</td><td>CE</td><td></td></tr>" for i in range(count))
+        return f"<table><tr><td>h</td></tr>{rows}</table>"
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.urllib.request.urlopen')
+    def test_firewall_refusals_are_retried(self, urlopen, sleep):
+        refusal = self.respond("<html>FOR SECURITY REASONS, THIS PAGE CAN NOT BE ACCESSED.</html>", "utf-8")
+        urlopen.side_effect = [refusal, OSError("reset"), self.respond(self.full_page())]
+        self.assertEqual(len(market_data.fetch_listed_etfs(attempts=5, pause=40)), 60)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [40, 40])
+
+    @patch('market_data.time.sleep')
+    @patch('market_data.urllib.request.urlopen')
+    def test_a_list_that_never_arrives_is_an_error(self, urlopen, sleep):
+        urlopen.return_value = self.respond(self.full_page(count=3))   # far too short to be the real list
+        with self.assertRaises(ConnectionError):
+            market_data.fetch_listed_etfs(attempts=2, pause=1)
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_index_round_trip(self):
+        entries = {"0056.TW": {"name": "元大高股息", "listed": "2007-12-26"}, "0050.TW": {"name": "元大台灣50", "listed": ""}}
+        with tempfile.TemporaryDirectory() as folder:
+            with open(market_data.write_index(entries, folder), encoding="utf-8") as fh:
+                text = fh.read()
+        self.assertTrue(text.startswith("ticker,name,listed\n0050.TW,"))
+        self.assertEqual(market_data.parse_index(text), entries)
+        with self.assertRaises(ValueError):
+            market_data.parse_index("<html>Not Found</html>")
+
+    def test_index_is_read_from_the_mirror_once_an_hour(self):
+        text = "ticker,name,listed\n0056.TW,元大高股息,2007-12-26\n00878.TW,國泰永續高股息,2020-07-20\n"
+        with patch.object(market_data, "MIRROR_URL", "https://mirror.test/data"), \
+                patch.object(market_data, "_listed_extras", return_value=set()), \
+                patch.object(market_data, "_http_get_text", return_value=text) as get:
+            self.assertEqual(market_data.listing_info("0056.tw"), {"name": "元大高股息", "listed": "2007-12-26"})
+            self.assertEqual(market_data.listing_info("2330.TW"), {})
+            self.assertEqual(market_data.available_snapshots(), ["0056.TW", "00878.TW"])
+        get.assert_called_once_with("https://mirror.test/data/index.csv")
+
+    def test_unreadable_index_means_no_listing_information(self):
+        with patch.object(market_data, "MIRROR_URL", "https://mirror.test/data"), \
+                patch.object(market_data, "_http_get_text", side_effect=OSError("404")):
+            self.assertEqual(market_data.mirror_index(), {})
+            self.assertEqual(market_data.listing_info("0056.TW"), {})
+
+    def test_universe_is_every_listed_etf_plus_the_extra_list(self):
+        listed = market_data.parse_listed_etfs(LISTING_PAGE)
+        with patch.object(market_data, "fetch_listed_etfs", return_value=dict(listed)):
+            universe = market_data.mirror_universe(["0050.TW", "spy"])
+        self.assertEqual(sorted(universe), ["00413A.TW", "0050.TW", "00631L.TW", "SPY"])
+        self.assertEqual(universe["0050.TW"]["name"], "元大台灣50")       # the exchange's entry is kept
+        self.assertEqual(universe["SPY"], {"name": "", "listed": ""})
+
+    def test_universe_falls_back_to_the_published_index(self):
+        previous = {"0056.TW": {"name": "元大高股息", "listed": "2007-12-26"}}
+        with patch.object(market_data, "fetch_listed_etfs", side_effect=ConnectionError("refused")), \
+                patch.object(market_data, "mirror_index", return_value=previous):
+            self.assertEqual(sorted(market_data.mirror_universe(["0050.TW"])), ["0050.TW", "0056.TW"])
+
+
 def roc(ts, style="/"):
     y, m, d = ts.year - 1911, ts.month, ts.day
     return f"{y}/{m:02d}/{d:02d}" if style == "/" else f"{y}年{m:02d}月{d:02d}日"
@@ -793,6 +930,28 @@ class BackfillTests(unittest.TestCase):
         self.assertEqual((info['proxy'], info['months'], info['start'], info['end']), ('OLD', 96, '2012-02', '2020-01'))
         self.assertEqual(info['overlap_months'], 24)
         self.assertTrue(-1 <= info['correlation'] <= 1)
+
+    def test_just_listed_asset_with_one_month_of_prices(self):
+        days = pd.bdate_range('2022-01-11', '2022-01-20')
+        raw = pd.DataFrame({'Close': np.linspace(10, 11, len(days)), 'Dividends': 0.0}, index=days)
+        raw.attrs['ticker'] = 'NEW.TW'
+        with self.assertRaises(ValueError) as ctx:
+            monthly_data(raw, 10)
+        self.assertIn("NEW.TW 的第一筆價格在 2022-01-11", str(ctx.exception))
+        self.assertIn("最早要等到 2022-02 有了第二筆月價才能進場", str(ctx.exception))
+
+        short = monthly_data(raw, 10, allow_short=True)
+        self.assertTrue(short.empty)
+        self.assertEqual((short.attrs['base_month'], short.attrs['base_close']), ('2022-01', 10.0))
+
+        out = backfill_with_proxy(short, self.proxy)
+        self.assertTrue(out['Synthetic'].all())
+        self.assertEqual(out.index[-1], pd.Period('2022-01', freq='M'))      # the asset's own price month
+        self.assertAlmostEqual(out['Close'].iloc[-1], 10.0)                   # anchored on its real price
+        pd.testing.assert_series_equal(out['Price_Return'], self.proxy.loc[out.index, 'Price_Return'])
+        self.assertEqual(out.attrs['backfill']['months'], len(out))
+        merged = align_months(out)
+        self.assertEqual(len(merged), len(out))
 
     def test_proxy_that_is_no_older_changes_nothing(self):
         out = backfill_with_proxy(self.proxy, self.asset)
