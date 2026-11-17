@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import engine
+import report
 import ui_state as ui
 from market_data import (load_history, monthly_data, align_months, backfill_with_proxy, normalize_ticker,
                          request_live)
@@ -67,6 +68,8 @@ DCA_MODES = {
 
 _PATH_RE = re.compile(r"[0-9eE+\-., ]{1,200}")
 SHORT_HISTORY_MONTHS = 120
+DISCLAIMER = ("⚠️ 本工具是財務工程的模擬，結果完全取決於歷史資料與你輸入的假設，僅供教育與研究用途，不構成任何投資建議。"
+              "借錢投資可能損失全部本金並仍須償還貸款，請自行審慎評估，必要時諮詢專業人士。")
 DATA_SOURCE_NAMES = {
     "live": "剛從 Yahoo Finance 取得",
     "cache": "這台主機先前取得的存檔",
@@ -476,6 +479,29 @@ else:
     result = run_summary(data, params)
     hist_res, mc_res, schedule = result.hist, result.mc, result.schedule
 
+    HIST, MC = "歷史滾動與情境拼接", f"蒙地卡羅（{mc_paths} 次）"
+    record = {"data_notes": [], "warnings": [], "summaries": {"貸款": [], HIST: [], MC: []}, "tables": [], "figures": []}
+
+    def caution(text):
+        st.warning(text)
+        record["warnings"].append(text)
+
+    def data_note(text):
+        st.caption(text)
+        record["data_notes"].append(text)
+
+    def show_metric(column, group, name, value):
+        column.metric(name, value)
+        record["summaries"][group].append((name, value))
+
+    def show_table(heading, frame, note=""):
+        st.table(frame)
+        record["tables"].append((heading, frame, note))
+
+    def show_chart(heading, figure, note=""):
+        st.plotly_chart(figure, width='stretch')
+        record["figures"].append((heading, figure, note))
+
     # ---- 資料來源與品質 ----
     st.markdown("---")
     n_repairs = sum(len(feed.attrs.get('repairs', [])) for feed in feeds.values())
@@ -491,8 +517,10 @@ else:
             role = "（歷史替身）" if symbol == symbol_proxy and symbol not in (symbol_a, symbol_b) else ""
             fetched = (feed.attrs.get('fetched_at') or '')[:10]
             origin = DATA_SOURCE_NAMES.get(feed.attrs.get('data_source'), '')
-            st.caption(f"{symbol}{role}：來源價格期間 {feed.attrs['source_start']} 至 {feed.attrs['source_end']}（非成立／上市日期）。"
-                       + (f"資料取得時間 {fetched}（{origin}）。" if fetched and origin else ""))
+            data_note(f"{symbol}{role}：來源價格期間 {feed.attrs['source_start']} 至 {feed.attrs['source_end']}（非成立／上市日期）。"
+                      + (f"資料取得時間 {fetched}（{origin}）。" if fetched and origin else ""))
+            record["data_notes"] += [f"{symbol} 已自動修正：{n}" for n in feed.attrs.get('repairs', [])]
+            record["data_notes"] += [f"{symbol} 資料提醒（未更動）：{n}" for n in feed.attrs.get('anomalies', [])]
             if feed.attrs.get('repairs'):
                 st.info(f"🔧 {symbol} 的來源資料有已知問題，已自動修正：\n\n" + "\n\n".join(f"- {n}" for n in feed.attrs['repairs']))
             if feed.attrs.get('anomalies'):
@@ -501,54 +529,54 @@ else:
         if backfill:
             corr = backfill['correlation']
             corr_txt = f"兩者重疊 {backfill['overlap_months']} 個月，月報酬相關係數 {corr:.2f}。" if corr == corr else ""
-            st.caption(f"📎 {symbol_a} 在 {backfill['start']} 至 {backfill['end']} 這 {backfill['months']} 個月還沒有自己的資料，"
+            data_note(f"📎 {symbol_a} 在 {backfill['start']} 至 {backfill['end']} 這 {backfill['months']} 個月還沒有自己的資料，"
                        f"以 {backfill['proxy']} 當時的實際漲跌與配息代替。{corr_txt}")
         elif symbol_proxy and symbol_proxy != symbol_a and not loaded["proxy_problem"]:
-            st.caption(f"📎 替身 {symbol_proxy} 的歷史沒有比 {symbol_a} 更早（或中間有缺口），所以沒有用到。")
-        st.caption(f"📎 用股息模型算的配息（歷史資料用完之後的假想未來"
+            data_note(f"📎 替身 {symbol_proxy} 的歷史沒有比 {symbol_a} 更早（或中間有缺口），所以沒有用到。")
+        data_note(f"📎 用股息模型算的配息（歷史資料用完之後的假想未來"
                    f"{'，以及蒙地卡羅' if mc_dividends == engine.MC_DIVIDENDS_MODEL else ''}）：{INTERVAL_NAMES[result.dividend_interval]}發一次"
                    f"{'，依這檔標的最近三年的紀錄判斷' if dividend_interval == 0 else ''}。")
         if result.modelled_b_months:
             first_real = data.index[result.modelled_b_months]
-            st.caption(f"📎 {symbol_b} 在 {first_real:%Y-%m} 之前沒有資料，這 {result.modelled_b_months} 個月用「第一標的漲跌 × {result.beta_b:.2f} 倍」推估"
+            data_note(f"📎 {symbol_b} 在 {first_real:%Y-%m} 之前沒有資料，這 {result.modelled_b_months} 個月用「第一標的漲跌 × {result.beta_b:.2f} 倍」推估"
                        "（倍數由兩者重疊期間估出；不假設它會持續贏過或輸給這個倍數）。")
 
     for symbol, feed in feeds.items():
         if str(feed.attrs.get('data_source', '')).startswith('snapshot'):
             saved = (feed.attrs.get('fetched_at') or '')[:10] or '先前'
             if feed.attrs.get('topped_up_to'):
-                st.warning(f"⚠️ {symbol}：即時行情暫時無法取得，目前使用 {saved} 存檔的資料，並已用證交所的資料補到 {feed.attrs['topped_up_to']}。"
+                caution(f"⚠️ {symbol}：即時行情暫時無法取得，目前使用 {saved} 存檔的資料，並已用證交所的資料補到 {feed.attrs['topped_up_to']}。"
                            "可以稍後按側欄的「重新載入行情」再試一次。")
             else:
-                st.warning(f"⚠️ {symbol}：即時行情暫時無法取得，目前使用 {saved} 存檔的資料，最新的價格與配息可能沒有包含在內。"
+                caution(f"⚠️ {symbol}：即時行情暫時無法取得，目前使用 {saved} 存檔的資料，最新的價格與配息可能沒有包含在內。"
                            "可以稍後按側欄的「重新載入行情」再試一次。")
     if backfill and backfill['correlation'] == backfill['correlation'] and backfill['correlation'] < 0.6:
-        st.warning(f"⚠️ {symbol_a} 與替身 {backfill['proxy']} 在重疊的 {backfill['overlap_months']} 個月裡，月報酬相關係數只有 {backfill['correlation']:.2f}，"
+        caution(f"⚠️ {symbol_a} 與替身 {backfill['proxy']} 在重疊的 {backfill['overlap_months']} 個月裡，月報酬相關係數只有 {backfill['correlation']:.2f}，"
                    "兩者走勢差異不小，替身可能不適合，建議換一檔性質更接近的。")
     if loaded["proxy_problem"]:
-        st.warning(f"⚠️ 替身 {symbol_proxy} 的資料無法使用，改為只用 {symbol_a} 自己的歷史。原因：{loaded['proxy_problem']}")
+        caution(f"⚠️ 替身 {symbol_proxy} 的資料無法使用，改為只用 {symbol_a} 自己的歷史。原因：{loaded['proxy_problem']}")
     own_yield = feeds[symbol_a]['Div_Yield']
     recent_yield = float(own_yield.tail(60).mean() * 12)
     uses_assumed_yield = ("蒙地卡羅和歷史資料用完之後的未來情境" if mc_dividends == engine.MC_DIVIDENDS_MODEL
                           else "歷史資料用完之後的未來情境")
     if own_yield.sum() == 0 and base_div_yield > 0:
-        st.warning(f"⚠️ {symbol_a} 的歷史資料裡沒有任何配息，但「未來平均一年發多少股息」設為 {base_div_yield * 100:.1f}%。"
+        caution(f"⚠️ {symbol_a} 的歷史資料裡沒有任何配息，但「未來平均一年發多少股息」設為 {base_div_yield * 100:.1f}%。"
                    f"{uses_assumed_yield}，配息是照這個數字算的，等於憑空多出一筆現金；如果它真的不配息，請把這個拉桿調到 0。")
     elif recent_yield > 0 and not 2 / 3 <= base_div_yield / recent_yield <= 1.5:
-        st.warning(f"⚠️ 「未來平均一年發多少股息」設為 {base_div_yield * 100:.1f}%，但 {symbol_a} 最近 {min(60, len(own_yield))} 個月實際平均約 {recent_yield * 100:.1f}%"
+        caution(f"⚠️ 「未來平均一年發多少股息」設為 {base_div_yield * 100:.1f}%，但 {symbol_a} 最近 {min(60, len(own_yield))} 個月實際平均約 {recent_yield * 100:.1f}%"
                    f"（全部歷史平均 {float(own_yield.mean() * 12) * 100:.1f}%）。{uses_assumed_yield}，配息是照你設的數字算的，"
                    "差距這麼大會直接影響結果，請確認這是你想測試的假設。")
     if n_months < SHORT_HISTORY_MONTHS:
         hint = ("可以在側欄「上市前的歷史用哪一檔代替」填一檔性質相近、上市更久的標的（例如 0056.TW 或 0050.TW）。"
                 if not backfill else "")
-        st.warning(f"⚠️ 可用的歷史只有 {n_months} 個月（不到 10 年），很可能沒有涵蓋完整的空頭循環，破產機率容易被低估。{hint}")
+        caution(f"⚠️ 可用的歷史只有 {n_months} 個月（不到 10 年），很可能沒有涵蓋完整的空頭循環，破產機率容易被低估。{hint}")
 
     pmt_after_grace = float(schedule.payments[grace_periods])
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("初期每月應繳", f"${int(schedule.payments[0]):,}")
-    col2.metric("寬限期後每月應繳", f"${int(pmt_after_grace):,}")
-    col3.metric("初始現金緩衝", f"${int(result.buffer_cash):,}")
+    show_metric(col1, "貸款", "初期每月應繳", f"${int(schedule.payments[0]):,}")
+    show_metric(col2, "貸款", "寬限期後每月應繳", f"${int(pmt_after_grace):,}")
+    show_metric(col3, "貸款", "初始現金緩衝", f"${int(result.buffer_cash):,}")
 
     if schedule.payments.max() > pmt_after_grace * 1.001:
         peak = int(schedule.payments.argmax())
@@ -605,10 +633,10 @@ else:
         n_spliced = int(hist_res['Is_Spliced'].sum())
         n_pure = n_total - n_spliced
 
-        c1.metric("槓桿破產率 (全部起點)", f"{hist_res['Ruin_Prob'].mean() * 100:.1f}%")
+        show_metric(c1, HIST, "槓桿破產率 (全部起點)", f"{hist_res['Ruin_Prob'].mean() * 100:.1f}%")
         pure = hist_res[~hist_res['Is_Spliced']]
         if n_pure > 0:
-            c1.metric(f"⤷ 僅『純歷史』起點破產率 (n={n_pure})", f"{pure['Ruin_Prob'].mean() * 100:.1f}%")
+            show_metric(c1, HIST, f"⤷ 僅『純歷史』起點破產率 (n={n_pure})", f"{pure['Ruin_Prob'].mean() * 100:.1f}%")
         c1.caption(f"共 {n_total} 個起點：純歷史 {n_pure} 個、含未來情境拼接 {n_spliced} 個。"
                    "相鄰的起點走的幾乎是同一段行情，所以這不是幾百個獨立樣本，破產率只能當作「歷史上發生過的情況」來看。"
                    f"{'⚠️ 拼接起點還全部共用同一條 scenario 劇本，彼此更加相關，僅供單一劇本壓力參考。' if n_spliced > 0 else ''}")
@@ -620,11 +648,11 @@ else:
         if rate_volatility > 0:
             c1.caption("📈 這一欄的利率只照你排定的路徑走，不含隨機升降息。")
 
-        c1.metric("槓桿擊敗 DCA 勝率 (全部起點)", f"{hist_res['Lev_Win'].mean() * 100:.1f}%")
+        show_metric(c1, HIST, "槓桿擊敗 DCA 勝率 (全部起點)", f"{hist_res['Lev_Win'].mean() * 100:.1f}%")
         h_med = hist_res['Lev_Final_Survivors'].median()
-        c1.metric("槓桿期滿中位數 (存活者)", f"${int(h_med):,}" if not pd.isna(h_med) else "無")
+        show_metric(c1, HIST, "槓桿期滿中位數 (存活者)", f"${int(h_med):,}" if not pd.isna(h_med) else "無")
         c1.caption(f"把破產的也算進去（以 0 計）：${int(hist_res['Lev_Final'].median()):,}。")
-        c1.metric("DCA 定期定額 期滿中位數", f"${int(hist_res['DCA_Final'].median()):,}")
+        show_metric(c1, HIST, "DCA 定期定額 期滿中位數", f"${int(hist_res['DCA_Final'].median()):,}")
 
     c2.markdown(f"#### 【理論】蒙地卡羅宇宙 ({mc_paths}次)")
     if mc_dividends == engine.MC_DIVIDENDS_HISTORY:
@@ -640,45 +668,49 @@ else:
     if result.mc_ok and not mc_res.empty:
         ruin_rate = float(mc_res['Is_Ruined'].mean())
         margin = 1.96 * (ruin_rate * (1 - ruin_rate) / len(mc_res)) ** 0.5
-        c2.metric("槓桿破產率 (現金流斷裂)", f"{ruin_rate * 100:.1f}%")
+        show_metric(c2, MC, "槓桿破產率 (現金流斷裂)", f"{ruin_rate * 100:.1f}%")
         if ruin_rate > 0:
             c2.markdown(f"**白話：大約每 {max(1, round(1 / ruin_rate))} 種可能的未來，就有 1 種會在中途繳不出貸款。**")
             c2.caption(f"抽樣誤差約 ±{margin * 100:.1f} 個百分點（95% 信賴區間，{len(mc_res)} 次模擬）。")
         else:
             c2.markdown(f"**白話：{len(mc_res)} 種模擬的未來裡，沒有任何一種繳不出貸款。**")
             c2.caption(f"這只代表用歷史上出現過的行情重組時沒有發生，不代表不可能；真實的破產率有 95% 的把握低於 {3 / len(mc_res) * 100:.2f}%。")
-        c2.metric("槓桿擊敗 DCA 勝率", f"{mc_res['Lev_Win'].mean() * 100:.1f}%")
+        show_metric(c2, MC, "槓桿擊敗 DCA 勝率", f"{mc_res['Lev_Win'].mean() * 100:.1f}%")
         m_med = mc_res.loc[~mc_res['Is_Ruined'], 'Lev_Final'].median()
-        c2.metric("槓桿期滿中位數 (存活者)", f"${int(m_med):,}" if not pd.isna(m_med) else "無")
+        show_metric(c2, MC, "槓桿期滿中位數 (存活者)", f"${int(m_med):,}" if not pd.isna(m_med) else "無")
         c2.caption(f"把破產的也算進去（以 0 計）：${int(mc_res['Lev_Final'].median()):,}。"
                    "破產時其實還欠著沒還完的貸款，真實處境比 0 更差。")
-        c2.metric("DCA 定期定額 期滿中位數", f"${int(mc_res['DCA_Final'].median()):,}")
+        show_metric(c2, MC, "DCA 定期定額 期滿中位數", f"${int(mc_res['DCA_Final'].median()):,}")
     else:
         c2.warning("歷史資料過短 (< 2 個月)，無法進行有意義的 Block Bootstrap 模擬。")
 
     if not hist_res.empty:
         st.markdown("##### 實證拼接測試期滿淨值分佈 (槓桿策略)")
-        chart = hist_res.assign(破產機率=(hist_res['Ruin_Prob'] * 100).round(1).astype(str) + '%')
-        fig_hist = px.bar(chart, x='Start_Date', y='Lev_Final', color='Is_Ruined',
-                          pattern_shape='Is_Spliced', hover_data=['破產機率'],
-                          color_discrete_map={True: '#E74C3C', False: '#1ABC9C'},
-                          labels={'Start_Date': '進場月份', 'Lev_Final': '期滿資產淨值 (元)',
-                                  'Is_Ruined': '破產(斷頭)', 'Is_Spliced': '含未來情境拼接'})
-        st.plotly_chart(fig_hist, width='stretch')
+        chart = hist_res.assign(
+            破產機率=(hist_res['Ruin_Prob'] * 100).round(1).astype(str) + '%',
+            結果=hist_res['Is_Ruined'].map({True: '破產', False: '撐到期滿'}),
+            資料=hist_res['Is_Spliced'].map({True: '含未來情境', False: '純歷史'}))
+        fig_hist = px.bar(chart, x='Start_Date', y='Lev_Final', color='結果', pattern_shape='資料',
+                          hover_data=['破產機率'],
+                          color_discrete_map={'破產': '#E74C3C', '撐到期滿': '#1ABC9C'},
+                          category_orders={'結果': ['撐到期滿', '破產'], '資料': ['純歷史', '含未來情境']},
+                          labels={'Start_Date': '進場月份', 'Lev_Final': '期滿資產淨值 (元)'})
+        fig_hist.update_layout(legend_title_text='')
+        show_chart("歷史上每個月進場的期滿淨值（槓桿策略）", fig_hist, "紅色代表破產；有斜線紋路代表該起點的歷史資料不足、已拼接未來情境。")
         st.caption("有斜線紋路的長條 = 該起點歷史資料不足、已拼接未來 scenario 劇本，請謹慎解讀。")
 
     if result.mc_ok and not mc_res.empty:
         st.markdown("##### 蒙地卡羅：期滿淨值的分佈")
         levels = [0.05, 0.25, 0.50, 0.75, 0.95]
         names = ["最差的 5%", "偏差的 25%", "中位數", "偏好的 25%", "最好的 5%"]
-        st.table(pd.DataFrame({
+        show_table("蒙地卡羅：期滿淨值的分佈", pd.DataFrame({
             "槓桿策略（破產以 0 計）": [f"${int(v):,}" for v in mc_res['Lev_Final'].quantile(levels)],
             "定期定額對照組": [f"${int(v):,}" for v in mc_res['DCA_Final'].quantile(levels)],
         }, index=names))
         st.caption("每一列是「有這麼多比例的模擬結果比這個數字差」。例如「最差的 5%」那列，代表 20 次裡有 1 次會落在這個金額以下。")
 
         st.markdown("##### 蒙地卡羅：自己掏了多少錢、換到多少報酬")
-        st.table(pd.DataFrame({
+        show_table("蒙地卡羅：自己掏了多少錢、換到多少報酬", pd.DataFrame({
             "槓桿策略": [money(mc_res['Out_Of_Pocket'].median()), money(mc_res['Lev_Final'].median()),
                          percent(mc_res['Lev_IRR'].median()), percent(mc_res['Lev_IRR'].quantile(0.05))],
             "定期定額對照組": [money(mc_res['DCA_Invested'].median()), money(mc_res['DCA_Final'].median()),
@@ -689,7 +721,8 @@ else:
                    "破產的路徑算 -100%；整段期間完全沒有自掏的路徑無法計算，不列入。")
 
         st.markdown("##### 蒙地卡羅：資產隨時間的可能範圍")
-        st.plotly_chart(fan_chart(result.mc_fan), width='stretch')
+        show_chart("蒙地卡羅：資產隨時間的可能範圍", fan_chart(result.mc_fan),
+                   "色帶是槓桿策略手上資產的總值（還沒扣掉貸款），破產的路徑以 0 計。")
         gap = result.mc_fan['lev_p5'] - result.mc_fan['loan_balance']
         if (gap < 0).any():
             worst = int(gap.idxmin())
@@ -707,7 +740,7 @@ else:
                                     color_discrete_sequence=['#E74C3C'],
                                     labels={'Ruin_Month': '進場後第幾個月'})
             fig_ruin.update_layout(yaxis_title='破產的模擬次數', bargap=0.05)
-            st.plotly_chart(fig_ruin, width='stretch')
+            show_chart("蒙地卡羅：破產發生在進場後第幾個月", fig_ruin)
             st.caption(f"{len(ruined_paths)} 次破產的模擬裡，有一半發生在第 {int(ruined_paths['Ruin_Month'].median())} 個月之前。"
                        "集中在哪一段，通常就是現金流最吃緊的時期（例如寬限期剛結束）。")
 
@@ -769,7 +802,8 @@ else:
                        color_discrete_map={'總資產淨值(槓桿)': '#3498DB', '總資產淨值(DCA)': '#9B59B6', '貸款剩餘餘額': '#F39C12'},
                        hover_data={'相對期數': True}, labels={'value': '金額 (元)', 'variable': ''})
         fig1.update_xaxes(type='category', tickmode='array', tickvals=month_labels[::tick_step])
-        st.plotly_chart(fig1, width='stretch')
+        show_chart(f"逐月追蹤：{sel_month} 進場的資產與貸款", fig1,
+                   "單一進場月份的結果，真實資料用完之後接上未來情境。")
 
         st.markdown("##### 槓桿策略：每月貸款繳納資金來源拆解")
         fig2 = px.bar(df_trace, x='真實/預測月份', y=['來自配息資金池', '來自緩衝金', '變賣主資產', '變賣第二標的', '本薪(自掏腰包)'],
@@ -777,7 +811,7 @@ else:
                                           '變賣第二標的': '#8E44AD', '本薪(自掏腰包)': '#E74C3C'},
                       hover_data={'相對期數': True}, labels={'value': '當月繳款金額 (元)', 'variable': ''})
         fig2.update_xaxes(type='category', tickmode='array', tickvals=month_labels[::tick_step])
-        st.plotly_chart(fig2, width='stretch')
+        show_chart(f"逐月追蹤：{sel_month} 進場，每月還款的資金來源", fig2)
 
         st.markdown("##### 會計明細 (Accounting Trace Ledger)")
         format_dict = {c: "{:,.2f}" if ('股數' in c or '利率' in c) else "${:,.0f}" for c in df_trace.columns if c not in ['真實/預測月份', '相對期數', '破產(斷頭)']}
@@ -786,9 +820,44 @@ else:
         csv = df_trace.to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 下載完整會計明細 (CSV)", data=csv, file_name=f"trace_進場{sel_month}.csv", mime="text/csv")
 
+    st.markdown("---")
+    st.markdown("##### 把這次的結果存下來")
+    generated = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d %H:%M（台北時間）")
+    base_url = (st.context.url or "").split("?")[0]
+    settings_query = urlencode(ui.settings())
+    order_text = " → ".join(strat_labels) if strat_labels else "（沒有任何來源）"
+    report_settings = [
+        ("貸款", f"{int(loan_principal / 10000):,} 萬元｜{loan_type}｜年利率 {loan_rate:g}%｜{loan_years} 年"
+                 + (f"｜寬限期 {grace_periods // 12} 年" if grace_periods else "｜無寬限期") + f"｜每月 {pay_day_option} 日扣款"),
+        ("第一標的", symbol_a + (f"（上市前以 {backfill['proxy']} 代替）" if backfill else "")),
+        ("配息", (f"再投入，其中 {reinvest_ratio_b * 100:.0f}% 買第二標的 {symbol_b}" if is_reinvest and symbol_b
+                  else "再投入，全部買回第一標的" if is_reinvest else "不再投入，存入配息資金池")),
+        ("還款資金的動用順序", order_text),
+        ("每月最多自掏", f"${int(max_salary_support):,}"),
+        ("開局預留的緩衝金", f"{buffer_months} 個月的還款"),
+        ("買賣手續費與滑價", f"{trx_fee * 100:g}%"),
+        ("歷史用完之後的未來情境", scenario_mode + (f"（{custom_path_str}）" if scenario_key is None else "")),
+        ("未來的股息假設", f"一年 {base_div_yield * 100:g}%｜{INTERVAL_NAMES[result.dividend_interval]}發放｜跟市場連動程度 {div_beta:g}"),
+        ("蒙地卡羅", f"{mc_paths} 次｜每次抽 {result.block_size} 個月一組｜{'固定亂數' if use_fixed_seed else '每次重新抽樣'}｜配息：{mc_div_label}"),
+        ("定期定額對照組", dca_label),
+        ("已啟用的情境與稅費", " ｜ ".join(active_flags) if active_flags else "無"),
+        ("逐月追蹤的進場月份", sel_month),
+    ]
+    report_html = report.build_report(
+        title=f"ETF 槓桿壓力測試報告：{symbol_a}",
+        version=APP_VERSION, generated=generated,
+        share_url=f"{base_url}?{settings_query}" if base_url and settings_query else base_url,
+        settings=report_settings, data_notes=record["data_notes"], warnings=record["warnings"],
+        summaries=[(group, rows) for group, rows in record["summaries"].items() if rows],
+        tables=record["tables"], figures=record["figures"], disclaimer=DISCLAIMER, source_url=SOURCE_URL)
+    st.download_button("📄 下載這次的報告 (HTML)", data=report_html.encode("utf-8"),
+                       file_name=f"stress_test_{symbol_a}_{pd.Timestamp.now(tz='Asia/Taipei'):%Y%m%d}.html",
+                       mime="text/html", key="dl_report")
+    st.caption("報告是單一檔案，包含這次的設定、主要結果、表格和互動圖表，用瀏覽器打開就能看，也可以直接列印成 PDF。"
+               "圖表需要連上網路才會顯示。")
+
 st.markdown("---")
-st.caption("⚠️ 本工具是財務工程的模擬，結果完全取決於歷史資料與你輸入的假設，僅供教育與研究用途，不構成任何投資建議。"
-           "借錢投資可能損失全部本金並仍須償還貸款，請自行審慎評估，必要時諮詢專業人士。")
+st.caption(DISCLAIMER)
 st.caption(f"{APP_VERSION}｜本程式為自由軟體，以 AGPL-3.0 授權，不提供任何擔保。"
            f"原始碼：[{SOURCE_URL.removeprefix('https://')}]({SOURCE_URL})")
 

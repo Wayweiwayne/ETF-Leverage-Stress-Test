@@ -248,6 +248,50 @@ class AppTests(unittest.TestCase):
         self.assertIn("2019-06-03 單日 -7", self.texts(at.warning))
         self.assertNotEqual(self.metric(at, "槓桿期滿中位數 (存活者)"), repaired)
 
+    def built_report(self, **query):
+        import report
+        with patch('report.build_report', wraps=report.build_report) as spy:
+            at = self.start(**query)
+        self.assertEqual(spy.call_count, 1)
+        return at, spy.call_args.kwargs, report.build_report(**spy.call_args.kwargs)
+
+    def test_report_gathers_what_the_page_shows(self):
+        at, parts, html = self.built_report(salary="15000", swan="1", swan_m="18", swan_d="35", seed="1", m="2020-03")
+        settings = dict(parts["settings"])
+        self.assertIn("500 萬元｜一般信貸", settings["貸款"])
+        self.assertIn("無寬限期", settings["貸款"])
+        self.assertEqual(settings["第一標的"], "00878.TW")
+        self.assertEqual(settings["每月最多自掏"], "$15,000")
+        self.assertIn("黑天鵝(第18月 -35%)", settings["已啟用的情境與稅費"])
+        self.assertEqual(settings["逐月追蹤的進場月份"], "2020-03")
+        # every number on the page is in the report, under the same name
+        shown = {m.label: m.value for m in at.metric}
+        reported = {label: value for _, rows in parts["summaries"] for label, value in rows}
+        self.assertEqual(reported, shown)
+        self.assertEqual([heading for heading, _, _ in parts["tables"]],
+                         ["蒙地卡羅：期滿淨值的分佈", "蒙地卡羅：自己掏了多少錢、換到多少報酬"])
+        headings = [heading for heading, _, _ in parts["figures"]]
+        self.assertEqual(headings[:2], ["歷史上每個月進場的期滿淨值（槓桿策略）", "蒙地卡羅：資產隨時間的可能範圍"])
+        self.assertIn("逐月追蹤：2020-03 進場的資產與貸款", headings)
+        self.assertTrue(any("來源價格期間" in note for note in parts["data_notes"]))
+        self.assertTrue(any("可用的歷史只有" in text for text in parts["warnings"]))
+        self.assertIn("ETF 槓桿壓力測試報告：00878.TW", html)
+        self.assertIn(f"版本 {APP_VERSION}", html)
+        self.assertGreater(len(html), 20_000)
+
+    def test_report_lists_data_repairs_and_stale_data(self):
+        _, parts, _ = self.built_report(a="SEAM.TW")
+        self.assertTrue(any("SEAM.TW 已自動修正" in note and "1 股拆成 4 股" in note for note in parts["data_notes"]))
+        _, parts, _ = self.built_report(a="STALE.TW")
+        self.assertTrue(any("目前使用 2024-11-05 存檔的資料" in text for text in parts["warnings"]))
+
+    def test_no_report_when_there_are_no_results(self):
+        import report
+        self.load_history.side_effect = ValueError("暫時無法取得資料")
+        with patch('report.build_report', wraps=report.build_report) as spy:
+            self.start()
+        spy.assert_not_called()
+
     def test_data_origin_and_download_date_are_shown(self):
         captions = self.texts(self.start().caption)
         self.assertIn("資料取得時間 2024-12-31（剛從 Yahoo Finance 取得）", captions)
