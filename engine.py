@@ -979,7 +979,7 @@ def run(df, params, anchor_idx):
 @dataclass(frozen=True)
 class SolveResult:
     field: str           # "principal" or "salary_cap"
-    value: float | None  # the limit found; None when nothing in the range meets the target
+    value: float | None  # the limit found, lo + k*step or hi; None when nothing in the range meets the target
     ruin_rate: float     # Monte Carlo ruin rate at `value`; with no value, at the end closest to the target
     target: float        # highest acceptable ruin rate
     status: str          # "ok", "all_meet" (the whole range meets it) or "none_meet" (none of it does)
@@ -1007,8 +1007,13 @@ def solve_for(df, params, field, target_ruin, lo, hi, step):
     `field="principal"` finds the largest loan, `field="salary_cap"` the smallest monthly
     out-of-pocket cap, among lo, lo + step, lo + 2*step, ... up to hi, and hi itself when it is
     not on that grid. Every other setting comes from `params`. Every evaluation draws the same
-    paths (seed 42 when `params.seed` is None), so the ruin rate moves with the setting alone and
-    a binary search is enough; the rate reported is always one actually simulated.
+    paths (seed 42 when `params.seed` is None), so the ruin rate moves with the setting alone.
+
+    The search is a bisection that takes the ruin rate as never falling with a bigger loan and
+    never rising with a higher cap. The health-levy threshold can break that by a hair; the edge
+    found is then a point where the rate crosses the target, not necessarily the last one, and
+    the rate reported is always one actually simulated. It runs at most
+    max(2, ceil(log2((hi - lo) / step)) + 3) simulations, and exactly one when lo == hi.
     """
     if field not in _SOLVE_FIELDS:
         raise ValueError(f"求解項目必須是 principal（貸款本金）或 salary_cap（每月自掏上限），收到：{field!r}")
@@ -1069,11 +1074,18 @@ def solve_for(df, params, field, target_ruin, lo, hi, step):
 def sensitivity_grid(df, params, principals, salary_caps, mc_paths=1000):
     """Monte Carlo ruin rate for every pair of loan principal (rows) and monthly out-of-pocket cap (columns).
 
-    Rows and columns keep the order given. Every other setting comes from `params`, with
-    `mc_paths` paths, and every cell draws the same paths (seed 42 when `params.seed` is None).
+    Rows and columns keep the order given, repeated values included. Every other setting comes
+    from `params`, with `mc_paths` paths, and every cell draws the same paths (seed 42 when
+    `params.seed` is None).
     """
-    _require_monte_carlo(df)
     principals, salary_caps = list(principals), list(salary_caps)
+    if not principals or not salary_caps:
+        raise ValueError("貸款本金與每月自掏上限都至少要有一個值。")
+    if not all(np.isfinite(v) and v > 0 for v in principals):
+        raise ValueError("熱圖的貸款本金必須大於 0。")
+    if not all(np.isfinite(v) and v >= 0 for v in salary_caps):
+        raise ValueError("熱圖的每月自掏上限不可為負。")
+    _require_monte_carlo(df)
     base = replace(params, seed=_solve_seed(params), mc_paths=mc_paths)
     rates = [[_mc_ruin_rate(df, replace(base, principal=pr, salary_cap=cap)) for cap in salary_caps]
              for pr in principals]

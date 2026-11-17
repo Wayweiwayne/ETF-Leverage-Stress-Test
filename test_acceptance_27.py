@@ -44,7 +44,7 @@ def ruin(df, p, **changes):
 
 
 def candidates(lo, hi, step):
-    """SPEC：value 只能是 lo + k*step（不超過 hi），hi 不在格點上時 hi 也是候選值。"""
+    """SPEC 4.1／D1：value 是 lo + k*step（不超過 hi）或 hi。"""
     k_max = int(math.floor((hi - lo) / step + TOL))
     values = [lo + k * step for k in range(k_max + 1)]
     if hi - values[-1] > TOL * max(1.0, abs(hi)):
@@ -53,11 +53,11 @@ def candidates(lo, hi, step):
 
 
 def eval_limit(lo, hi, step):
-    """SPEC：evaluations 不可超過 ceil(log2((hi - lo) / step)) + 3。lo == hi 時公式無定義，寬鬆取 3。"""
+    """D2：evaluations 不可超過 max(2, ceil(log2((hi - lo) / step)) + 3)；lo == hi 只評估 1 次。"""
     span = (hi - lo) / step
     if span <= 0:
-        return 3
-    return math.ceil(math.log2(span)) + 3
+        return 1
+    return max(2, math.ceil(math.log2(span)) + 3)
 
 
 def brute_force(df, p, field, target, lo, hi, step):
@@ -225,9 +225,12 @@ class SolvePrincipalTests(ContractChecks, unittest.TestCase):
     def test_single_point_range(self):
         p = harsh()
         meets = self.solve(self.df, p, "principal", 0.05, 4_000_000.0, 4_000_000.0, 100_000.0)
-        self.assertEqual((meets.status, meets.value), ("all_meet", 4_000_000.0))
+        self.assertEqual((meets.status, meets.value, meets.evaluations), ("all_meet", 4_000_000.0, 1))
         fails = self.solve(self.df, p, "principal", 0.05, 5_000_000.0, 5_000_000.0, 100_000.0)
-        self.assertEqual((fails.status, fails.value), ("none_meet", None))
+        self.assertEqual((fails.status, fails.value, fails.evaluations), ("none_meet", None, 1))
+        for cap, status in ((40_000.0, "all_meet"), (0.0, "none_meet")):
+            res = self.solve(self.df, p, "salary_cap", 0.05, cap, cap, 1_000.0)
+            self.assertEqual((res.status, res.evaluations), (status, 1))
 
     def test_app_sized_search_stays_within_the_evaluation_limit(self):
         # 衝刺 2 畫面的範圍：10 萬～目前本金的 10 倍，單位 10 萬（約 500 個格點）。
@@ -440,6 +443,31 @@ class SensitivityGridTests(unittest.TestCase):
         again = E.sensitivity_grid(self.df, harsh(seed=None), *args, mc_paths=300)
         np.testing.assert_array_equal(unseeded.to_numpy(), fixed.to_numpy())
         np.testing.assert_array_equal(unseeded.to_numpy(), again.to_numpy())
+
+    def test_invalid_axes_raise(self):
+        # D5：空的軸、本金 <= 0、自掏上限 < 0 丟 ValueError（中文訊息，D8）。
+        p = harsh()
+        cases = {"本金軸是空的": ([], [0.0]), "自掏軸是空的": ([1e6], []), "本金為 0": ([0.0, 1e6], [0.0]),
+                 "本金為負": ([-1e6], [0.0]), "自掏上限為負": ([1e6], [10_000.0, -1.0])}
+        for name, (principals, caps) in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(ValueError) as ctx:
+                    E.sensitivity_grid(self.df, p, principals, caps, mc_paths=50)
+                self.assertRegex(str(ctx.exception), CJK)
+
+    def test_too_little_data_raises(self):
+        with self.assertRaises(ValueError):
+            E.sensitivity_grid(self.df.iloc[:1], harsh(), [1e6], [0.0], mc_paths=50)
+
+    def test_duplicate_values_are_allowed(self):
+        # D5：重複值允許；每個重複的列／欄都照傳入順序出現，值相同。
+        grid = E.sensitivity_grid(self.df, harsh(), [2e6, 4e6, 2e6], [0.0, 20_000.0, 0.0], mc_paths=200)
+        self.assertEqual(grid.shape, (3, 3))
+        self.assertEqual(list(grid.index), [2e6, 4e6, 2e6])
+        self.assertEqual(list(grid.columns), [0.0, 20_000.0, 0.0])
+        values = grid.to_numpy(dtype=float)
+        np.testing.assert_array_equal(values[0], values[2])
+        np.testing.assert_array_equal(values[:, 0], values[:, 2])
 
     def test_params_are_not_modified(self):
         p = harsh(seed=None)

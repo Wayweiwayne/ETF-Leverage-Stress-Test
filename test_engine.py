@@ -1011,7 +1011,7 @@ def mc_ruin(df, p, **overrides):
 
 
 def evaluation_budget(lo, hi, step):
-    return math.ceil(math.log2((hi - lo) / step)) + 3
+    return max(2, math.ceil(math.log2((hi - lo) / step)) + 3) if hi > lo else 1
 
 
 def candidates(lo, hi, step):
@@ -1133,8 +1133,7 @@ class SolveForTests(unittest.TestCase):
                 self.assertEqual(res.status, "all_meet" if whole else "ok", msg)
                 self.assertEqual(res.value, best, msg)
                 self.assertEqual(res.ruin_rate, 0.0, msg)
-                if hi > lo:
-                    self.assertLessEqual(res.evaluations, evaluation_budget(lo, hi, step), msg)
+                self.assertLessEqual(res.evaluations, evaluation_budget(lo, hi, step), msg)
 
     def test_parameters_passed_in_are_left_alone(self):
         p = params(annual_rate_pct=10.0, seed=None, mc_paths=100)
@@ -1238,9 +1237,21 @@ class SensitivityGridTests(unittest.TestCase):
         self.assertTrue((np.diff(values, axis=0) >= -0.01).all())
         self.assertGreater(values[-1, 1], values[0, 1])        # the grid is not flat
 
-    def test_empty_axes_give_an_empty_table(self):
-        self.assertEqual(E.sensitivity_grid(self.df, self.p, [], [0.0]).shape, (0, 1))
-        self.assertEqual(E.sensitivity_grid(self.df, self.p, [1e6], []).shape, (1, 0))
+    def test_bad_axes_are_rejected_in_chinese_before_anything_runs(self):
+        for principals, caps in (([], [0.0]), ([1e6], []), ([1e6, 0.0], [0.0]), ([-1e6], [0.0]),
+                                 ([float("nan")], [0.0]), ([1e6], [-1.0]), ([1e6], [float("inf")])):
+            with mock.patch.object(E, "_mc_ruin_rate", return_value=0.0) as calls:
+                with self.assertRaisesRegex(ValueError, r"[\u4e00-\u9fff]", msg=(principals, caps)):
+                    E.sensitivity_grid(self.df, self.p, principals, caps)
+            self.assertEqual(calls.call_count, 0)
+
+    def test_repeated_values_are_kept_in_place(self):
+        grid = E.sensitivity_grid(self.df, self.p, [8e6, 5e6, 8e6], [0.0, 25_000.0, 0.0], mc_paths=100)
+        self.assertEqual(list(grid.index), [8e6, 5e6, 8e6])
+        self.assertEqual(list(grid.columns), [0.0, 25_000.0, 0.0])
+        values = grid.to_numpy()
+        np.testing.assert_array_equal(values[0], values[2])
+        np.testing.assert_array_equal(values[:, 0], values[:, 2])
 
 
 if __name__ == '__main__':

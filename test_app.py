@@ -13,7 +13,8 @@ from version import APP_VERSION
 
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
 MORTGAGE, CREDIT = "理財型房貸 (長年期/可寬限)", "一般信貸 (短年期/無寬限)"
-SOURCES = ["本薪(自掏腰包)", "配息資金池", "緩衝金", "變賣資產(主標的)", "變賣資產(第二標的)"]
+SOURCES = ["薪水（自掏腰包）", "存下來的配息", "緩衝金", "賣第一標的", "賣第二標的"]
+MC_RUIN = "破產機率（繳不出貸款）"
 
 
 def fake_history(ticker):
@@ -73,7 +74,7 @@ class AppTests(unittest.TestCase):
         self.assertIn(f"({APP_VERSION})", at.title[0].value)
         self.assertEqual(len(at.error), 0)
         self.assertEqual(self.metric(at, "初期每月應繳"), "$67,199")
-        self.assertIn("槓桿破產率 (現金流斷裂)", [m.label for m in at.metric])
+        self.assertIn(MC_RUIN, [m.label for m in at.metric])
         self.assertEqual(dict(at.query_params), {})
 
     def test_credit_loan_defaults_to_no_grace_and_mortgage_to_grace(self):
@@ -121,8 +122,8 @@ class AppTests(unittest.TestCase):
 
     def test_a_source_can_be_left_out(self):
         at = self.start(p1="3", p2="4", p3="4", p4="4", p5="4")
-        self.assertEqual(self.order(at), ["變賣資產(主標的)"] + ["（不使用）"] * 4)
-        self.assertIn("不會動用：本薪(自掏腰包)、配息資金池、緩衝金、變賣資產(第二標的)", [c.value for c in at.sidebar.caption])
+        self.assertEqual(self.order(at), ["賣第一標的"] + ["（不使用）"] * 4)
+        self.assertIn("不會動用：薪水（自掏腰包）、存下來的配息、緩衝金、賣第二標的", [c.value for c in at.sidebar.caption])
         self.assertIn("第二標的沒有排進順位", self.texts(at.sidebar.caption))
 
     def test_second_asset_is_a_source_only_when_there_is_one(self):
@@ -132,25 +133,25 @@ class AppTests(unittest.TestCase):
             with self.subTest(query):
                 at = self.start(**query)
                 self.assertEqual(self.order(at), SOURCES[:4])
-                self.assertNotIn("變賣資產(第二標的)", at.selectbox(key="p1").options)
+                self.assertNotIn("賣第二標的", at.selectbox(key="p1").options)
 
     def test_links_made_before_the_second_asset_was_a_source_still_mean_the_same(self):
         # "4" has always meant "not used"; the new source takes the next number.
         at = self.start(p1="3", p2="0", p3="4", p4="4", p5="5")
-        self.assertEqual(self.order(at), ["變賣資產(主標的)", "本薪(自掏腰包)", "（不使用）", "（不使用）", "變賣資產(第二標的)"])
+        self.assertEqual(self.order(at), ["賣第一標的", "薪水（自掏腰包）", "（不使用）", "（不使用）", "賣第二標的"])
 
     def test_selling_the_second_asset_shows_in_the_ledger(self):
         at = self.start(salary="0", p1="5", p2="3", p3="4", p4="4", p5="4", seed="1")
         ledger = at.dataframe[0].value
-        self.assertGreater(ledger['變賣主資產'].sum(), 0)
-        self.assertIn('變賣第二標的', ledger.columns)
-        paid = ledger[['來自配息資金池', '來自緩衝金', '變賣主資產', '變賣第二標的', '本薪(自掏腰包)']].sum(axis=1)
-        np.testing.assert_allclose(paid[~ledger['破產(斷頭)']], ledger['每月應繳本息'][~ledger['破產(斷頭)']])
+        self.assertGreater(ledger['賣第一標的繳'].sum(), 0)
+        self.assertIn('賣第二標的繳', ledger.columns)
+        paid = ledger[['從存下來的配息繳', '從緩衝金繳', '賣第一標的繳', '賣第二標的繳', '從薪水繳（自掏）']].sum(axis=1)
+        np.testing.assert_allclose(paid[~ledger['已破產']], ledger['當月應繳'][~ledger['已破產']])
 
     def test_no_source_at_all_warns(self):
         at = self.start(p1="4", p2="4", p3="4", p4="4", p5="4")
         self.assertTrue(any("第一個月就會破產" in w.value for w in at.sidebar.warning))
-        self.assertEqual(self.metric(at, "槓桿破產率 (現金流斷裂)"), "100.0%")
+        self.assertEqual(self.metric(at, MC_RUIN), "100.0%")
 
     def test_settings_are_restored_from_a_link(self):
         at = self.start(loan="800", type="0", years="15", grace_y="2", a="0056.TW", reinv="0", salary="40000",
@@ -197,9 +198,9 @@ class AppTests(unittest.TestCase):
         # A fund that pays nothing, salary covering every payment: value is shares times price, nothing else.
         common = dict(a="00631L.TW", reinv="0", salary="1000000", fee="0", seed="1")
         ledger = self.start(swan="1", swan_m="12", swan_d="40", **common).dataframe[0].value
-        before, after = ledger['總資產淨值(槓桿)'].iloc[10], ledger['總資產淨值(槓桿)'].iloc[11]
+        before, after = ledger['槓桿：手上資產'].iloc[10], ledger['槓桿：手上資產'].iloc[11]
         plain = self.start(**common).dataframe[0].value
-        natural = plain['總資產淨值(槓桿)'].iloc[11] / plain['總資產淨值(槓桿)'].iloc[10] - 1
+        natural = plain['槓桿：手上資產'].iloc[11] / plain['槓桿：手上資產'].iloc[10] - 1
         self.assertAlmostEqual(after / before - 1, natural - 0.40, places=6)
 
     def test_invalid_custom_path_is_reported_not_guessed(self):
@@ -227,7 +228,7 @@ class AppTests(unittest.TestCase):
         at = self.start(proxy="OLD.TW")
         self.assertEqual(at.selectbox(key="m").options[0], "2006-02")
         self.assertIn("以 OLD.TW 當時的實際漲跌與配息代替", self.texts(at.caption))
-        self.assertIn("120 個起點用到了替身 OLD.TW 的歷史", self.texts(at.caption))
+        self.assertIn("120 個進場月份用到了替身 OLD.TW 的歷史", self.texts(at.caption))
         self.assertIn("00631L.TW 在 2016-02 之前沒有資料，這 120 個月用", self.texts(at.caption))
         self.assertNotIn("可用的歷史只有", self.texts(at.warning))
         self.assertEqual(len(at.error), 0)
@@ -241,18 +242,18 @@ class AppTests(unittest.TestCase):
         at = self.start()
         self.ok(at.text_input(key="proxy").set_value("no good").run())
         self.assertIn("替身 NO GOOD 的資料無法使用", self.texts(at.warning))
-        self.assertIn("槓桿破產率 (現金流斷裂)", [m.label for m in at.metric])
+        self.assertIn(MC_RUIN, [m.label for m in at.metric])
 
     def test_unadjusted_split_is_repaired_and_announced(self):
         at = self.start(a="SEAM.TW", seed="1")
         self.assertIn("1 股拆成 4 股", self.texts(at.info))
         self.assertNotIn("不尋常", self.texts(at.warning))
-        repaired = self.metric(at, "槓桿期滿中位數 (存活者)")
+        repaired = self.metric(at, "期滿資產中位數（沒破產的）")
 
         at = self.start(a="SEAM.TW", seed="1", fix="0")
         self.assertNotIn("1 股拆成 4 股", self.texts(at.info))
         self.assertIn("2019-06-03 單日 -7", self.texts(at.warning))
-        self.assertNotEqual(self.metric(at, "槓桿期滿中位數 (存活者)"), repaired)
+        self.assertNotEqual(self.metric(at, "期滿資產中位數（沒破產的）"), repaired)
 
     def built_report(self, **query):
         import report
@@ -268,20 +269,22 @@ class AppTests(unittest.TestCase):
         self.assertIn("無寬限期", settings["貸款"])
         self.assertEqual(settings["第一標的"], "00878.TW")
         self.assertEqual(settings["每月最多自掏"], "$15,000")
-        self.assertIn("黑天鵝(第18月 -35%)", settings["已啟用的情境與稅費"])
-        self.assertEqual(settings["逐月追蹤的進場月份"], "2020-03")
+        self.assertIn("突發大崩盤（第 18 個月 -35%）", settings["有開啟的情境與稅費"])
+        self.assertEqual(settings["逐月明細的進場月份"], "2020-03")
+        self.assertEqual(settings["安全邊界"], "這次沒有計算")
         # every number on the page is in the report, under the same name
         shown = {m.label: m.value for m in at.metric}
         reported = {label: value for _, rows in parts["summaries"] for label, value in rows}
         self.assertEqual(reported, shown)
         self.assertEqual([heading for heading, _, _ in parts["tables"]],
-                         ["蒙地卡羅：期滿淨值的分佈", "蒙地卡羅：自己掏了多少錢、換到多少報酬"])
+                         ["蒙地卡羅：期滿資產的分佈", "蒙地卡羅：自己掏了多少錢、換到多少報酬"])
         headings = [heading for heading, _, _ in parts["figures"]]
-        self.assertEqual(headings[:2], ["歷史上每個月進場的期滿淨值（槓桿策略）", "蒙地卡羅：資產隨時間的可能範圍"])
-        self.assertIn("逐月追蹤：2020-03 進場的資產與貸款", headings)
+        self.assertEqual(headings[:2], ["歷史回測：每個月進場，期滿剩多少", "蒙地卡羅：資產隨時間的可能範圍"])
+        self.assertIn("2020-03 進場：資產和貸款餘額", headings)
+        self.assertIn("2020-03 進場：每月貸款用哪些錢繳", headings)
         self.assertTrue(any("來源價格期間" in note for note in parts["data_notes"]))
         self.assertTrue(any("可用的歷史只有" in text for text in parts["warnings"]))
-        self.assertIn("ETF 槓桿壓力測試報告：00878.TW", html)
+        self.assertIn("借錢投資 ETF 壓力測試報告：00878.TW", html)
         self.assertIn(f"版本 {APP_VERSION}", html)
         self.assertGreater(len(html), 20_000)
 
@@ -323,7 +326,7 @@ class AppTests(unittest.TestCase):
 
         helped = self.start(a="NEW.TW", proxy="OLD.TW")
         self.assertEqual(len(helped.error), 0)
-        self.assertIn("槓桿破產率 (現金流斷裂)", [m.label for m in helped.metric])
+        self.assertIn(MC_RUIN, [m.label for m in helped.metric])
         self.assertIn("📅 最早可以從 2006-02 進場：NEW.TW 的第一筆價格在 2024-12-16", self.texts(helped.caption))
 
     def test_earliest_entry_month_is_explained_with_a_proxy(self):
@@ -343,7 +346,7 @@ class AppTests(unittest.TestCase):
             self.ok(at.sidebar.button[0].click().run())
         self.assertEqual(sorted(call.args[0] for call in request_live.call_args_list),
                          ["00631L.TW", "00878.TW", "OLD.TW"])
-        self.assertIn("槓桿破產率 (現金流斷裂)", [m.label for m in at.metric])
+        self.assertIn(MC_RUIN, [m.label for m in at.metric])
 
     def test_snapshot_data_is_flagged_with_its_date(self):
         at = self.start(a="STALE.TW")
@@ -354,15 +357,15 @@ class AppTests(unittest.TestCase):
         at = self.start(seed="1")
         metrics = [(m.label, m.value) for m in at.metric]
         ledger = at.dataframe[0].value
-        self.assertEqual(ledger['真實/預測月份'].iloc[0], "2022-02")     # entered 2022-01, first payment a month later
+        self.assertEqual(ledger['月份'].iloc[0], "2022-02")     # entered 2022-01, first payment a month later
         self.ok(at.selectbox(key="m").set_value("2019-05").run())
         self.assertEqual([(m.label, m.value) for m in at.metric], metrics)
-        self.assertEqual(at.dataframe[0].value['真實/預測月份'].iloc[0], "2019-06")
-        self.assertFalse(at.dataframe[0].value['總資產淨值(槓桿)'].equals(ledger['總資產淨值(槓桿)']))
+        self.assertEqual(at.dataframe[0].value['月份'].iloc[0], "2019-06")
+        self.assertFalse(at.dataframe[0].value['槓桿：手上資產'].equals(ledger['槓桿：手上資產']))
 
     def test_random_job_loss_reports_averaged_history(self):
         at = self.start(jl="1", jl_mode="1", jl_prob="20")
-        self.assertIn("每個起點各模擬 93 種失業時點", self.texts(at.caption))
+        self.assertIn("每個進場月份各模擬 93 種失業時點", self.texts(at.caption))
         self.assertEqual(len(at.error), 0)
 
     def test_same_settings_give_the_same_monte_carlo_by_default(self):
@@ -411,7 +414,7 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("沒有任何配息", self.texts(self.start(a="00631L.TW", div="0").warning))
 
     def test_monte_carlo_uses_recorded_dividends_unless_told_otherwise(self):
-        mc_labels = ["槓桿破產率 (現金流斷裂)", "槓桿擊敗 DCA 勝率"]
+        mc_labels = [MC_RUIN, "贏過定期定額的機率"]
 
         def mc_metrics(at):
             values = [m.value for m in at.metric]
@@ -432,20 +435,20 @@ class AppTests(unittest.TestCase):
                       self.texts(self.start(div="12", mcdiv="1").warning))
 
     def flags(self, at):
-        return next((c.value for c in at.caption if c.value.startswith("🟢 已啟用情境")), "")
+        return next((c.value for c in at.caption if c.value.startswith("🟢 這次有開啟")), "")
 
     def ledger_tax(self, at):
         return at.dataframe[0].value['配息被扣的稅費'].sum()
 
     def test_taiwan_taxes_apply_by_default_and_can_be_switched_off(self):
         default = self.start(seed="1")
-        self.assertIn("稅費(證交稅0.1%、補充保費2.11%、股利所得稅3.5%)", self.flags(default))
+        self.assertIn("稅費（證交稅0.1%、補充保費2.11%、股利所得稅3.5%）", self.flags(default))
         self.assertGreater(self.ledger_tax(default), 0)
 
         untaxed = self.start(seed="1", stax="0", nhi="0", itax="0")
         self.assertNotIn("稅費", self.flags(untaxed))
         self.assertEqual(self.ledger_tax(untaxed), 0)
-        median = lambda at: int(self.metric(at, "DCA 定期定額 期滿中位數").replace("$", "").replace(",", ""))
+        median = lambda at: int(self.metric(at, "定期定額：期滿資產中位數").replace("$", "").replace(",", ""))
         self.assertGreater(median(untaxed), median(default))
 
     def test_tax_bracket_sets_the_dividend_tax(self):
@@ -454,7 +457,7 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("股利所得稅", low)
         self.assertIn("補充保費2.11%", low)
         self.assertIn("配息的40%算股利所得", self.flags(self.start(dshare="40")))
-        self.assertIn("開辦費$6,000", self.flags(self.start(lfee="6000")))
+        self.assertIn("開辦費\\$6,000", self.flags(self.start(lfee="6000")))
         self.assertEqual(self.start(itax="99").selectbox(key="itax").value, "12%")       # nonsense in a link
 
     def test_floating_rate_path_and_random_moves(self):
@@ -463,12 +466,12 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("月付金最高會到", self.texts(fixed.caption))
 
         floating = self.start(**{"float": "1"})
-        self.assertIn("浮動利率(第2年起每年 +0.25、+0.25、+0.125 個百分點，蒙地卡羅每年隨機 ±0.25)", self.flags(floating))
+        self.assertIn("浮動利率（第2年起每年 +0.25、+0.25、+0.125 個百分點，蒙地卡羅每年隨機 ±0.25）", self.flags(floating))
         self.assertIn("月付金最高會到", self.texts(floating.caption))
         self.assertIn("九成的路徑年利率落在", self.texts(floating.caption))
         self.assertIn("不含隨機升降息", self.texts(floating.caption))
         self.assertEqual(self.metric(floating, "初期每月應繳"), self.metric(fixed, "初期每月應繳"))
-        rates = floating.dataframe[0].value['當期年利率(%)']
+        rates = floating.dataframe[0].value['當月年利率 (%)']
         np.testing.assert_allclose(rates.iloc[[0, 12, 24, 36, 83]], [3.5, 3.75, 4.0, 4.125, 4.125])
 
         steady = self.start(**{"float": "1", "rvol": "0", "rpath": "-0.5"})
@@ -488,8 +491,8 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("依這檔標的最近三年的紀錄判斷", yearly)
 
     def test_empty_dividend_pool_is_pointed_out_when_dividends_are_reinvested(self):
-        self.assertIn("配息資金池不會有錢", self.texts(self.start().sidebar.caption))
-        self.assertNotIn("配息資金池不會有錢", self.texts(self.start(reinv="0").sidebar.caption))
+        self.assertIn("「存下來的配息」不會有錢", self.texts(self.start().sidebar.caption))
+        self.assertNotIn("「存下來的配息」不會有錢", self.texts(self.start(reinv="0").sidebar.caption))
 
     def test_disclaimer_is_shown_even_when_data_fails(self):
         self.assertIn("不構成任何投資建議", self.texts(self.start().caption))
@@ -503,11 +506,111 @@ class AppTests(unittest.TestCase):
         at = self.start()
         self.assertTrue(any("暫時無法取得資料" in e.value for e in at.error))
 
+    # ---- 安全邊界 ----
+
+    def find_limit(self, at):
+        return self.ok(at.button(key="safe_run").click().run())
+
+    def heatmap(self, at):
+        import json
+        charts = [json.loads(c.proto.spec) for c in at.get("plotly_chart")]
+        return next(c for c in charts if any(t.get("type") == "heatmap" for t in c["data"]))
+
+    def test_safety_limit_waits_for_the_button(self):
+        import report
+        with patch('report.build_report', wraps=report.build_report) as spy, \
+                patch('engine.solve_for', wraps=__import__('engine').solve_for) as solve:
+            at = self.start()
+        solve.assert_not_called()
+        self.assertIn("還沒有計算。按「計算安全邊界」開始。", self.texts(at.caption))
+        self.assertIn("想知道最多能借多少？看下方的[安全邊界](#safe-limit)。", self.texts(at.caption))
+        self.assertNotIn("最多可以借", [m.label for m in at.metric])
+        self.assertEqual(at.segmented_control(key="tgt").value, "5")
+        self.assertEqual(at.segmented_control(key="tgt").options, ["1%", "5%", "10%"])
+        self.assertEqual(dict(spy.call_args.kwargs["settings"])["安全邊界"], "這次沒有計算")
+
+    def test_safety_limit_answers_and_map(self):
+        at = self.find_limit(self.start(seed="1"))
+        labels = {m.label: m for m in at.metric}
+        self.assertEqual(labels["最多可以借"].value, "5,000 萬以上")         # the fixture market is kind
+        self.assertEqual(labels["每月最少要自掏"].value, "$0")
+        self.assertEqual(len(at.success), 2)
+        self.assertNotIn("還沒有計算", self.texts(at.caption))
+        table = at.table[0].value
+        self.assertEqual(table.shape, (6, 6))
+        self.assertEqual(list(table.columns), ["$12,500", "$18,750", "$25,000", "$31,250", "$37,500", "$50,000"])
+        self.assertEqual(table.iloc[2, 2], "◆ " + self.metric(at, MC_RUIN))      # same paths as the result above
+        figure = self.heatmap(at)
+        self.assertEqual((figure["layout"]["xaxis"]["type"], figure["layout"]["yaxis"]["type"]), ("category", "category"))
+        self.assertIn("◆ 目前", figure["data"][0]["text"][2][2])
+
+    def test_safety_limit_with_a_tight_budget(self):
+        at = self.find_limit(self.start(salary="5000", rate="8", seed="1", tgt="1"))
+        self.assertEqual(at.segmented_control(key="tgt").value, "1")
+        principal = self.metric(at, "最多可以借")
+        self.assertRegex(principal, r"^[\d,]+ 萬$")
+        sentences = self.texts(at.success) + self.texts(at.warning) + self.texts(at.error)
+        self.assertIn("要讓破產機率在 1% 以下，最多可以借 **" + principal, sentences)
+        self.assertIn("你目前設定 \\$5,000", sentences)                     # dollar signs are not read as a formula
+
+    def test_target_comes_from_the_link_and_goes_back_into_it(self):
+        self.assertEqual(self.start(tgt="10").segmented_control(key="tgt").value, "10")
+        self.assertEqual(self.start(tgt="7").segmented_control(key="tgt").value, "5")
+        at = self.start()
+        self.ok(at.segmented_control(key="tgt").set_value("1").run())
+        self.assertEqual(dict(at.query_params), {"tgt": ["1"]})
+        self.ok(at.segmented_control(key="tgt").set_value("5").run())
+        self.assertEqual(dict(at.query_params), {})
+
+    def test_old_safety_limit_is_marked_and_left_out_of_the_report(self):
+        import report
+        at = self.find_limit(self.start(seed="1"))
+        self.ok(at.segmented_control(key="tgt").set_value("10").run())
+        self.assertIn("你改了能接受的破產機率，下面還是 5% 的結果。", self.texts(at.warning))
+        self.assertIn("最多可以借", [m.label for m in at.metric])              # the old answer stays on screen
+        self.ok(at.segmented_control(key="tgt").set_value("5").run())
+        self.assertNotIn("你改了能接受的破產機率", self.texts(at.warning))
+
+        with patch('report.build_report', wraps=report.build_report) as spy:
+            self.ok(at.run())
+        parts = spy.call_args.kwargs
+        self.assertEqual(dict(parts["settings"])["安全邊界的目標"], "破產機率 ≤ 5%")
+        self.assertIn(("安全邊界（破產機率 ≤ 5%）", [("最多可以借", "5,000 萬以上"), ("借到上限時的破產機率",
+                                                                                  parts["summaries"][-1][1][1][1]),
+                                                ("每月最少要自掏", "$0"),
+                                                ("自掏到下限時的破產機率", parts["summaries"][-1][1][3][1])]),
+                      parts["summaries"])
+        self.assertIn("破產機率地圖：借多少 × 每月自掏多少", [h for h, _, _ in parts["tables"]])
+        self.assertIn("破產機率地圖：借多少 × 每月自掏多少", [h for h, _, _ in parts["figures"]])
+
+        with patch('report.build_report', wraps=report.build_report) as spy:
+            self.ok(at.number_input(key="loan").set_value(600).run())
+        self.assertIn("設定已變更，下面的安全邊界是用舊設定算的。", self.texts(at.warning))
+        parts = spy.call_args.kwargs
+        self.assertEqual(dict(parts["settings"])["安全邊界"], "這次沒有計算")
+        self.assertNotIn("破產機率地圖：借多少 × 每月自掏多少", [h for h, _, _ in parts["tables"]])
+        self.assertFalse(any(group.startswith("安全邊界") for group, _ in parts["summaries"]))
+        self.find_limit(at)
+        self.assertNotIn("舊設定", self.texts(at.warning))
+
+    def test_safety_limit_without_salary_in_the_order(self):
+        at = self.find_limit(self.start(p1="3", p2="5", p3="4", p4="4", p5="4", seed="1"))
+        self.assertIn("你沒有把「薪水（自掏腰包）」排進還款順位", self.texts(at.info))
+        self.assertNotIn("每月最少要自掏", [m.label for m in at.metric])
+        rows = at.table[0].value.map(lambda cell: cell.removeprefix("◆ ")).to_numpy()
+        self.assertTrue((rows == rows[:, :1]).all())                         # the cap changes nothing
+
+    def test_safety_limit_with_fresh_draws_and_a_big_fee(self):
+        at = self.find_limit(self.start(seed="0", lfee="3000000"))
+        self.assertIn("你關閉了「固定亂數」，安全邊界固定用同一組抽樣計算", self.texts(at.caption))
+        self.assertEqual(list(at.table[0].value.iloc[0]), ["—"] * 6)       # 250 萬 does not cover the fee
+        self.assertIn("「—」的格子", self.texts(at.caption))
+
     def test_blank_second_ticker_reinvests_everything_in_the_first(self):
         at = self.start()
         self.ok(at.text_input(key="b").set_value("").run())
         self.assertEqual(len(at.error), 0)
-        self.assertEqual(at.dataframe[0].value['再投入資產股數'].abs().sum(), 0)
+        self.assertEqual(at.dataframe[0].value['第二標的股數'].abs().sum(), 0)
 
 
 if __name__ == '__main__':

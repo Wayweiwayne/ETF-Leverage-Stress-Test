@@ -84,7 +84,7 @@ class StandaloneBuildTests(unittest.TestCase):
         self.assertEqual(out["exceptions"], [])
         self.assertEqual(out["errors"], [])
         self.assertTrue(any("這是單機版" in text for text in out["info"]))
-        self.assertIn("槓桿破產率 (現金流斷裂)", out["metrics"])
+        self.assertIn("破產機率（繳不出貸款）", out["metrics"])
         self.assertTrue(any("較舊的存檔" in text for text in out["captions"]))
 
     def test_unpacked_app_explains_a_ticker_it_does_not_have(self):
