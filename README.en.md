@@ -1,4 +1,4 @@
-# ETF Leverage & Carry Stress-Test Engine (V37)
+# ETF Leverage & Carry Stress-Test Engine (V38)
 
 > You borrowed to invest. Can you keep making the monthly payment? A stress-testing tool for leveraged investing, built around the risk of running out of cash.
 
@@ -38,7 +38,7 @@ The first month in which the payment cannot be covered, the strategy is **ruined
 - **Data checks and repairs** — splits and dividend units the data source left unadjusted are repaired and reported, outliers are flagged, and the last good download is used when the source is unreachable. See [DATA_NOTES.md](DATA_NOTES.md) (in Chinese).
 - **Job-loss scenarios** — a fixed window, or a random model in which unemployment becomes more likely when the market crashes.
 - **DCA comparison** — every path also runs a no-loan portfolio that invests monthly. By default it invests exactly what the leveraged strategy took from salary that month, so both sides put in the same money.
-- **Readable results** — the ruin rate comes with a plain-language reading and its sampling error, plus the distribution of final net worth, the timing of ruin, and CSV downloads.
+- **Readable results** — the ruin rate comes with a plain-language reading and its sampling error, plus the distribution of final net worth, the range of outcomes over time, money paid in and annual return, and the timing of ruin; results download as CSV or as an HTML report with the settings, figures and charts.
 - **Shareable links** — the address bar always carries the current settings. Copy the URL to hand someone the same scenario; a page refresh keeps your inputs.
 - Every input has a plain-language tooltip, and a separate page lists the formulas and model assumptions.
 
@@ -86,6 +86,7 @@ The app opens at `http://localhost:8501`.
 | `market_data.py` | Fetching with snapshot fallback, split repair and outlier checks, month alignment, pre-listing backfill. |
 | `main_page.py` | The main page: collects inputs, calls the engine, draws the charts. |
 | `ui_state.py` | Input defaults, bounds and URL synchronisation. |
+| `report.py` | Builds the downloadable HTML report. |
 | `pages/1_Model_Details.py` | Formulas and model assumptions. |
 | `app.py` | Entry point and page navigation. |
 | `version.py` | Version label. Changes are listed in [CHANGELOG.md](CHANGELOG.md) (in Chinese). |
@@ -112,6 +113,8 @@ python -m unittest -v
 ```
 
 The tests need no network access: the engine is checked against synthetic data, and the UI tests run the whole app on stubbed market data. GitHub Actions runs them on Python 3.11, 3.12 and 3.13 on every push (`.github/workflows/tests.yml`).
+
+A second workflow (`.github/workflows/refresh-data.yml`) refreshes snapshots of the most used tickers every day and publishes them on the `market-data` branch; the app reads those before contacting Yahoo Finance. See [DATA_NOTES.md](DATA_NOTES.md) (in Chinese).
 
 ## License
 

@@ -1,4 +1,5 @@
 """Market-data loading, repair and calendar-month alignment, independent of the UI."""
+import io
 import json
 import os
 import re
@@ -13,6 +14,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from version import SOURCE_URL
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TICKER_RE = re.compile(r"[A-Z0-9.\-^=]{1,20}")
 
@@ -20,6 +23,18 @@ _TICKER_RE = re.compile(r"[A-Z0-9.\-^=]{1,20}")
 SNAPSHOT_DIR = os.environ.get("ETF_SNAPSHOT_DIR", os.path.join(_HERE, ".yf_cache"))
 # Optional snapshots shipped with the app; read-only, consulted last.
 SEED_DIR = os.path.join(_HERE, "data", "snapshots")
+# Snapshots of the most used tickers, refreshed daily by a scheduled job and published on a branch
+# of the source repository. Reading them keeps ordinary visits away from the live source, which
+# throttles shared hosting addresses. Set ETF_SNAPSHOT_MIRROR to another base URL, or to "" to turn it off.
+MIRROR_BRANCH = "market-data"
+MIRROR_URL = os.environ.get(
+    "ETF_SNAPSHOT_MIRROR", SOURCE_URL.replace("https://github.com/", "https://raw.githubusercontent.com/") + "/" + MIRROR_BRANCH)
+# A stored copy fetched within this many hours is used as it is, without contacting the live source.
+SNAPSHOT_MAX_AGE_HOURS = 36
+_MIRROR_MISS_SECONDS = 3600
+_mirror_misses = {}
+_live_requests = set()
+_state_lock = threading.Lock()
 
 # Taiwan Stock Exchange: official, but one month per request and a firewall that rejects anything
 # faster than a request every several seconds. Far too slow for a whole history, so it can only
@@ -103,24 +118,76 @@ def save_snapshot(df, ticker, directory=None):
     return path
 
 
+def _parse_snapshot(source, ticker):
+    """A stored history from a path or an open text stream, or None if it is unusable."""
+    try:
+        if isinstance(source, str):
+            with open(source, encoding="utf-8") as fh:
+                text = fh.read()
+        else:
+            text = source.read()
+        first = text.split("\n", 1)[0].strip()
+        df = pd.read_csv(io.StringIO(text), comment="#", index_col="Date", parse_dates=["Date"])
+        validate_history(df)
+    except (OSError, ValueError, KeyError):
+        return None
+    fetched_at = first.split("=", 1)[1] if first.startswith("# fetched_at=") else ""
+    df.attrs.update(ticker=ticker, data_source="snapshot", fetched_at=fetched_at)
+    return df
+
+
+def _stored(directory, ticker):
+    return _parse_snapshot(os.path.join(directory, f"{ticker}.csv"), ticker) if directory else None
+
+
 def read_snapshot(ticker):
-    """Most recent stored history for the ticker, or None."""
+    """A stored history for the ticker, the local copy before the shipped one, or None."""
     ticker = normalize_ticker(ticker)
     for directory in (SNAPSHOT_DIR, SEED_DIR):
-        if not directory:
-            continue
-        path = os.path.join(directory, f"{ticker}.csv")
-        try:
-            with open(path, encoding="utf-8") as fh:
-                first = fh.readline().strip()
-            df = pd.read_csv(path, comment="#", index_col="Date", parse_dates=["Date"])
-            validate_history(df)
-        except (OSError, ValueError, KeyError):
-            continue
-        fetched_at = first.split("=", 1)[1] if first.startswith("# fetched_at=") else ""
-        df.attrs.update(ticker=ticker, data_source="snapshot", fetched_at=fetched_at)
-        return df
+        df = _stored(directory, ticker)
+        if df is not None:
+            return df
     return None
+
+
+def _http_get_text(url, timeout=8):
+    request = urllib.request.Request(url, headers={"User-Agent": "etf-stress-test"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8")
+
+
+def fetch_mirror(ticker):
+    """The daily published snapshot of a ticker, or None. A miss is remembered for an hour."""
+    if not MIRROR_URL:
+        return None
+    with _state_lock:
+        if time.monotonic() - _mirror_misses.get(ticker, float("-inf")) < _MIRROR_MISS_SECONDS:
+            return None
+    try:
+        text = _http_get_text(f"{MIRROR_URL}/{urllib.parse.quote(ticker)}.csv")
+        df = _parse_snapshot(io.StringIO(text), ticker)
+    except (OSError, ValueError):
+        df = None
+    if df is None:
+        with _state_lock:
+            _mirror_misses[ticker] = time.monotonic()
+    return df
+
+
+def _age_hours(df):
+    """Hours since the copy was fetched from the live source; infinite when unknown."""
+    try:
+        fetched = datetime.strptime(df.attrs.get("fetched_at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return float("inf")
+    return (datetime.now(timezone.utc) - fetched).total_seconds() / 3600
+
+
+def request_live(ticker):
+    """Make the next load of this ticker go to the live source even if a recent copy is stored."""
+    with _state_lock:
+        _live_requests.add(normalize_ticker(ticker))
+        _mirror_misses.pop(normalize_ticker(ticker), None)
 
 
 def _now():
@@ -250,13 +317,38 @@ def top_up_from_twse(snapshot, ticker):
     return out
 
 
-def load_history(ticker):
-    """Full daily history.
+def _save_quietly(df, ticker):
+    try:
+        save_snapshot(df, ticker)
+    except OSError:
+        pass  # a read-only disk must not stop usable data from being used
 
-    When the live source cannot be reached, falls back to the stored snapshot, brought up to
-    date from the exchange where that is possible.
+
+def load_history(ticker):
+    """Full daily history, from the nearest place that has a recent copy.
+
+    A copy fetched within SNAPSHOT_MAX_AGE_HOURS is used directly: the local one first, then
+    the daily published mirror. Otherwise the live source is asked. If that fails, the newest
+    stored copy of any age is returned, marked as a snapshot and brought up to date from the
+    exchange where that is switched on. request_live() skips the stored copies once.
     """
     ticker = normalize_ticker(ticker)
+    with _state_lock:
+        forced = ticker in _live_requests
+        _live_requests.discard(ticker)
+
+    local = mirror = None
+    if not forced:
+        local = _stored(SNAPSHOT_DIR, ticker)
+        if local is not None and _age_hours(local) <= SNAPSHOT_MAX_AGE_HOURS:
+            local.attrs["data_source"] = "cache"
+            return local
+        mirror = fetch_mirror(ticker)
+        if mirror is not None and _age_hours(mirror) <= SNAPSHOT_MAX_AGE_HOURS:
+            mirror.attrs["data_source"] = "mirror"
+            _save_quietly(mirror, ticker)
+            return mirror
+
     last_error = None
     # Fetch prices and corporate actions together; a failed dividend request
     # must not silently turn an income strategy into a zero-dividend strategy.
@@ -268,17 +360,19 @@ def load_history(ticker):
             )
             validate_history(df)
             df.attrs.update(ticker=ticker, data_source="live", fetched_at=_now())
-            try:
-                save_snapshot(df, ticker)
-            except OSError:
-                pass  # a read-only disk must not stop a successful download from being used
+            _save_quietly(df, ticker)
             return df
         except Exception as exc:
             last_error = exc
             if attempt < 2:
                 time.sleep(attempt + 1)
-    snapshot = read_snapshot(ticker)
-    if snapshot is not None:
+
+    if forced:
+        local, mirror = _stored(SNAPSHOT_DIR, ticker), fetch_mirror(ticker)
+    copies = [c for c in (local, mirror, _stored(SEED_DIR, ticker)) if c is not None]
+    if copies:
+        snapshot = min(copies, key=_age_hours)   # ties keep the order above: local, mirror, shipped
+        snapshot.attrs["data_source"] = "snapshot"
         if not TWSE_TOP_UP:
             return snapshot
         try:
@@ -556,13 +650,38 @@ def align_months(df_a, df_b=None):
     return merged
 
 
+def refresh_snapshots(tickers, directory):
+    """Download each ticker from the live source into `directory`. Returns how many came back live.
+
+    A ticker the live source refuses keeps its newest stored copy, so one bad day does not drop
+    it from the published set.
+    """
+    live = 0
+    for symbol in tickers:
+        try:
+            request_live(symbol)
+            history = load_history(symbol)
+        except ValueError as exc:
+            print(f"{symbol}: FAILED ({exc})")
+            continue
+        live += history.attrs.get("data_source") == "live"
+        print(f"{symbol}: {history.attrs.get('data_source')} {history.attrs.get('fetched_at')} -> "
+              f"{save_snapshot(history, symbol, directory)}")
+    return live
+
+
 if __name__ == "__main__":
-    # python market_data.py 0050.TW 0056.TW [--dir data/snapshots]
-    args = sys.argv[1:]
-    target = None
-    if "--dir" in args:
-        target = args[args.index("--dir") + 1]
-        args = [a for i, a in enumerate(args) if a != "--dir" and (i == 0 or args[i - 1] != "--dir")]
-    for symbol in args:
-        history = load_history(symbol)
-        print(symbol, history.attrs.get("data_source"), save_snapshot(history, symbol, target))
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Download market-data snapshots from the live source.")
+    parser.add_argument("tickers", nargs="*", help="Yahoo Finance symbols, e.g. 0050.TW 0056.TW")
+    parser.add_argument("--file", help="text file with one symbol per line (# starts a comment)")
+    parser.add_argument("--dir", default=SEED_DIR, help="folder to write to (default: data/snapshots)")
+    cli = parser.parse_args()
+    symbols = list(cli.tickers)
+    if cli.file:
+        with open(cli.file, encoding="utf-8") as fh:
+            symbols += [line.split("#")[0].strip() for line in fh if line.split("#")[0].strip()]
+    if not symbols:
+        parser.error("no tickers given")
+    sys.exit(0 if refresh_snapshots(symbols, cli.dir) else 1)
