@@ -159,6 +159,7 @@ class TriggerAndPlacementTests(SafetyHarness, unittest.TestCase):
         self.assertEqual((solve.call_count, grid.call_count), (0, 0))
         self.assertFalse(any(MAP_TITLE in t for t in self.section_texts(at)))
 
+        at = self.ok(at.button(key="run_sidebar").click().run())   # D13：主結果過期時安全邊界按鈕停用，要先按「開始計算」
         at, solve, grid = self.press(at)
         self.assertEqual(sorted(field for field, *_ in solve_calls(solve)), ["principal", "salary_cap"])
         self.assertEqual(grid.call_count, 1)

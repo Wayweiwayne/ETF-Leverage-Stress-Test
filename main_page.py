@@ -1,5 +1,6 @@
 import logging
 import re
+import types
 from contextlib import contextmanager
 from urllib.parse import urlencode
 
@@ -133,6 +134,27 @@ def fan_chart(fan):
 log = logging.getLogger(__name__)
 REPORT_FAILED = "❌ 這次的報告暫時無法產生，其他結果不受影響。"
 
+# ---- 開始計算按鈕 ----
+RUN_STATE = "_last_run"          # the last calculation: its settings snapshot, the values it used, its outcome
+DRAW = "_draw"                   # counts presses while the seed is random, so each one samples afresh
+RUN_REQUESTED = "_run_requested"  # set by the start button's callback, read on the rerun it causes
+LIVE_KEYS = ("m", "tgt")         # inputs that act at once and are not part of a calculation
+BUTTON = "開始計算"
+CALCULATION_FAILED = "❌ 這次的計算暫時無法完成。可以調整設定後再試一次，或按側欄的「重新載入行情」。"
+STALE_NOTICE = "⚠️ 設定已變更，結果尚未更新。下面還是上一次計算的結果，按側欄最上方的「開始計算」更新。"
+STALE_TOAST = "設定已變更。調好後按「開始計算」更新結果。"
+STALE_CAPTION = "⚠️ 設定已變更，結果尚未更新"
+FRESH_CAPTION = "✓ 結果對應目前的設定"
+AUTO_ON_CAPTION = "自動重算已開啟：每次調整都會重新計算。"
+REPORT_STALE = "⚠️ 設定已變更：報告內容是上一次計算的結果。"
+FIX_ERRORS_HELP = "請先修正上面的錯誤"
+AUTO_HELP = ("打開後，每次調整設定都會立刻重新計算（舊的做法）。設定很多或電腦較慢時建議關閉："
+             "調好所有設定，再按「開始計算」一次算完。")
+
+
+def request_run():
+    st.session_state[RUN_REQUESTED] = True
+
 
 @contextmanager
 def page_part(failure, broken):
@@ -198,12 +220,13 @@ def migrate_old_link(settings):
 SAFE_STATE = "_safety_limit"  # the last safety limit found, with the settings it was found for
 
 
-def show_safety_limit(record, data, params, mc_ok, snapshot, results_stale=False, cap=None):
+def show_safety_limit(record, data, params, mc_ok, snapshot, results_stale=False, cap=None, current_snapshot=None):
     """The safety-limit block: computed only when asked, then kept until the settings move on.
 
     `snapshot` identifies everything the search depends on. `results_stale` means the results
     above no longer match the sidebar; a search then has to wait for them, since it always uses
-    their settings. `cap` is the borrowing limit in dollars, if the credit check is on. What is shown and found goes into the report `record` only while it is current.
+    their settings. `current_snapshot` is what the sidebar says now: a search made for anything else is out of date.
+    `cap` is the borrowing limit in dollars, if the credit check is on. What is shown and found goes into the report `record` only while it is current.
     """
     st.header(safe.HEADER, anchor=safe.ANCHOR)
     st.caption(safe.INTRO)
@@ -236,8 +259,9 @@ def show_safety_limit(record, data, params, mc_ok, snapshot, results_stale=False
         record["settings"].append(("安全邊界", "這次沒有計算"))
         return
     found = saved["record"]
-    current = saved["snapshot"] == snapshot and found["target"] == target
-    if saved["snapshot"] != snapshot:
+    live = snapshot if current_snapshot is None else current_snapshot
+    current = saved["snapshot"] == live and found["target"] == target
+    if saved["snapshot"] != live:
         notice.warning(safe.STALE)
     elif not current:
         notice.warning(safe.STALE_TARGET.format(t=safe.target_text(found["target"])))
@@ -293,6 +317,8 @@ if not live_source_available():
 input_errors = []
 
 with st.sidebar:
+    run_slot = st.container()            # the "start" button; filled in once the inputs are known
+    auto_recalc = ui.checkbox("auto", "自動重算", False, widget=st.toggle, help=AUTO_HELP)
     st.header("1. 貸款條件")
     loan_type = ui.choice("type", "貸款種類", LOAN_TYPES, LOAN_TYPES[1], widget=st.radio,
                           on_change=reset_loan_defaults,
@@ -302,9 +328,11 @@ with st.sidebar:
     loan_kind = LOAN_KIND[loan_type]
     # Credit fields exist only for a personal loan; a mortgage is secured and not bound by the 22x rule.
     limits, entered_wan, lmode = None, None, 0
+    credit_inputs = None                 # the income fields; they exist only for a personal loan
     if loan_kind == "credit":
         income = ui.number("inc", credit.LABELS["inc"], credit.DEFAULT_INCOME, 0.5, min_value=0.0, max_value=1000.0,
                            format="%g", help=credit.HELP_INCOME)
+        credit_inputs = (income,)
         if income <= 0:
             st.caption(credit.L11)
         elif income < credit.MIN_YEARLY_INCOME / 12:
@@ -323,6 +351,7 @@ with st.sidebar:
             lmode = ui.choice("lmode", credit.LABELS["lmode"], credit.LMODE_OPTIONS, credit.LMODE_OPTIONS[0],
                               widget=st.radio, help=credit.HELP_LMODE)
             lmode = credit.LMODE_OPTIONS.index(lmode)
+            credit_inputs = (income, debt, multiple, product_max, lmode)
     estimated = limits is not None and lmode == 1
     loan_help = credit.HELP_LOAN[loan_kind] if loan_kind == "credit" else "你打算借多少錢來投資。例如填 300 就是借 300 萬。"
     if estimated:
@@ -634,7 +663,8 @@ def fetch_pure_asset_data(ticker, pay_day, repair, allow_short=False):
 
 
 @st.cache_data(ttl=3600, max_entries=32, show_spinner="模擬計算中…")
-def run_summary(df, sim_params):
+def run_summary(df, sim_params, draw=0):
+    # `draw` only keys the cache: with a random seed each press of the start button is a new draw.
     return engine.run_summary(df, sim_params)
 
 
@@ -672,8 +702,9 @@ symbol_a = ticker_a.strip().upper()
 symbol_b = ticker_b.strip().upper() if is_reinvest else ""
 symbol_proxy = ticker_proxy.strip().upper()
 
-if st.sidebar.button("重新載入行情", help="平常會優先使用一天半以內的存檔，不必每次都向行情來源重抓。"
-                                              "按這個按鈕會略過存檔，直接向 Yahoo Finance 重新取得這幾檔標的最新的價格與配息。"):
+reload_clicked = st.sidebar.button("重新載入行情", help="平常會優先使用一天半以內的存檔，不必每次都向行情來源重抓。"
+                                              "按這個按鈕會略過存檔，直接向 Yahoo Finance 重新取得這幾檔標的最新的價格與配息，並立刻重新計算。")
+if reload_clicked:
     for symbol in {symbol_a, symbol_b, symbol_proxy} - {""}:
         try:
             request_live(symbol)
@@ -690,17 +721,16 @@ except Exception:                             # prepare_unified_data already tur
 # ==========================================
 # 3. 結果
 # ==========================================
-def show_results():
-    """Everything below the title once the market data has loaded and the inputs are valid."""
+def show_results(result, snapshot, shared_settings, current_snapshot, stale):
+    """Everything below the title for one finished calculation.
+
+    It runs with the values the sidebar had when the calculation was made (see `frozen_view`), so
+    while the sidebar has moved on it still shows the last calculation as it was.
+    """
     data, feeds, backfill = loaded["data"], loaded["feeds"], loaded["backfill"]
     avail_dates = data.index.strftime('%Y-%m').unique().tolist()
     n_months = len(data)
 
-    try:
-        result = run_summary(data, params)
-    except ValueError as exc:                 # settings the engine cannot simulate
-        st.error(f"❌ 參數有誤，請先修正：\n\n{exc}")
-        return
     broken = []                               # parts below that failed to show
     hist_res, mc_res, schedule = result.hist, result.mc, result.schedule
 
@@ -952,8 +982,7 @@ def show_results():
     st.markdown("---")
     with page_part(part_failed("安全邊界"), broken):
         show_safety_limit(record, data, params, result.mc_ok,
-                          snapshot=(params, symbol_a, symbol_b, symbol_proxy, pay_day_option, repair_splits, borrow_cap),
-                          cap=borrow_cap)
+                          snapshot=snapshot, results_stale=stale, cap=borrow_cap, current_snapshot=current_snapshot)
     st.markdown("---")
 
     with page_part(part_failed("圖表"), broken):
@@ -1115,7 +1144,9 @@ def show_results():
         with page_part(REPORT_FAILED, broken):
             generated = taipei_now().strftime("%Y-%m-%d %H:%M（台北時間）")
             base_url = (st.context.url or "").split("?")[0]
-            settings_query = urlencode(ui.settings())
+            live = ui.settings()          # the link rebuilds the calculation; only the two live inputs follow the page
+            settings_query = urlencode({**{k: v for k, v in shared_settings.items() if k not in LIVE_KEYS},
+                                        **{k: v for k, v in live.items() if k in LIVE_KEYS}})
             order_text = " → ".join(strat_labels) if strat_labels else "（沒有任何來源）"
             report_settings = [
                 ("貸款", f"{credit.wan_text(loan_wan)} 萬元｜{loan_type}｜年利率 {loan_rate:g}%｜{loan_years} 年"
@@ -1147,17 +1178,74 @@ def show_results():
             st.download_button("📄 把這次的結果存下來", data=report_html.encode("utf-8"),
                                file_name=f"stress_test_{symbol_a}_{taipei_now():%Y%m%d}.html",
                                mime="text/html", key="dl_report", type="primary")
-            st.caption("報告是單一檔案，包含這次的設定、主要結果、表格和互動圖表，用瀏覽器打開就能看，也可以直接列印成 PDF。"
+            st.caption((REPORT_STALE if stale else "") + "報告是單一檔案，包含這次的設定、主要結果、表格和互動圖表，用瀏覽器打開就能看，也可以直接列印成 PDF。"
                        "圖表需要連上網路才會顯示。")
 
 
-if isinstance(loaded, str):
-    st.error(f"❌ 資料獲取異常：\n\n{loaded}")
-elif input_errors:
+def used_names(code):
+    """Every global name a function (and the functions inside it) may read."""
+    names = set(code.co_names)
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            names |= used_names(const)
+    return names
+
+
+def frozen_view(function, values):
+    """`function` with its globals replaced by a copy that holds `values`, so it sees an earlier run's settings."""
+    return types.FunctionType(function.__code__, {**globals(), **values}, function.__name__, function.__defaults__)
+
+
+# What counts as a setting that changes the results (R-01): everything the calculation reads from the sidebar.
+current_snapshot = (params, symbol_a, symbol_b, symbol_proxy, pay_day_option, repair_splits, borrow_cap,
+                    loan_type, credit_inputs)
+last = st.session_state.get(RUN_STATE)
+stale = last is not None and last["snapshot"] != current_snapshot
+requested = st.session_state.pop(RUN_REQUESTED, False) or reload_clicked
+if not input_errors and (last is None or requested or (auto_recalc and stale)):
+    values = {name: globals()[name] for name in used_names(show_results.__code__)
+              if name in globals() and not callable(globals()[name]) and not isinstance(globals()[name], types.ModuleType)}
+    if requested and params.seed is None:
+        st.session_state[DRAW] = st.session_state.get(DRAW, 0) + 1
+    last = {"snapshot": current_snapshot, "values": values, "settings": ui.settings(), "result": None, "error": None}
+    if isinstance(loaded, str):
+        last["error"] = f"❌ 資料獲取異常：\n\n{loaded}"
+    else:
+        try:
+            last["result"] = run_summary(loaded["data"], params, st.session_state.get(DRAW, 0))
+        except ValueError as exc:                 # settings the engine cannot simulate
+            last["error"] = f"❌ 參數有誤，請先修正：\n\n{exc}"
+        except Exception:
+            log.exception("calculation failed")
+            last["error"] = CALCULATION_FAILED
+    st.session_state[RUN_STATE] = last
+    stale = False
+
+with run_slot:
+    if auto_recalc:
+        st.caption(AUTO_ON_CAPTION)
+    else:
+        st.button(BUTTON, key="run_sidebar", type="primary" if stale else "secondary", width="stretch",
+                  icon=":material/play_arrow:", disabled=bool(input_errors), on_click=request_run,
+                  help=FIX_ERRORS_HELP if input_errors else None)
+        if last is not None:
+            st.caption(STALE_CAPTION if stale else FRESH_CAPTION)
+
+if stale and not st.session_state.get("_was_stale"):
+    st.toast(STALE_TOAST, icon="⚠️")          # only on the change from current to out of date, not on every edit after it
+st.session_state["_was_stale"] = stale
+
+if input_errors:
     st.error("❌ 參數有誤，請先修正：\n\n" + "\n\n".join(input_errors))
-else:
-    with page_part("❌ 這次的計算暫時無法完成。可以調整設定後再試一次，或按側欄的「重新載入行情」。", []):
-        show_results()
+if stale:
+    st.warning(STALE_NOTICE)
+if last is not None:
+    if last["error"]:
+        st.error(last["error"])
+    else:
+        with page_part(CALCULATION_FAILED, []):
+            frozen_view(show_results, last["values"])(last["result"], last["snapshot"], last["settings"],
+                                                      current_snapshot, stale)
 
 st.markdown("---")
 st.caption(DISCLAIMER)

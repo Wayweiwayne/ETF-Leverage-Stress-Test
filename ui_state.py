@@ -138,14 +138,14 @@ def number(key, label, default, step, min_value=None, max_value=None, **kwargs):
     return value
 
 
-def checkbox(key, label, default, **kwargs):
+def checkbox(key, label, default, widget=None, **kwargs):
     def parse(raw):
         if raw not in ("0", "1"):
             raise ValueError(raw)
         return raw == "1"
 
     _seed(key, bool(default), parse)
-    value = st.checkbox(label, key=key, **kwargs)
+    value = (widget or st.checkbox)(label, key=key, **kwargs)
     _remember(key, str(int(value)), str(int(bool(default))))
     return value
 

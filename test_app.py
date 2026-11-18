@@ -63,6 +63,12 @@ class AppTests(unittest.TestCase):
         self.assertEqual([str(e.value) for e in at.exception], [])
         return at
 
+    def change(self, edited):
+        """An edit followed by the start button: settings only reach the results once it is pressed."""
+        at = self.ok(edited.run())
+        button = at.button(key="run_sidebar")
+        return at if button.disabled else self.ok(button.click().run())
+
     def metric(self, at, label):
         return next(m.value for m in at.metric if m.label == label)
 
@@ -90,32 +96,32 @@ class AppTests(unittest.TestCase):
         self.assertFalse(at.checkbox(key="grace").value)
         self.assertEqual(self.metric(at, "初期每月應繳"), self.metric(at, "寬限期後每月應繳"))
 
-        self.ok(at.radio(key="type").set_value(MORTGAGE).run())
+        self.change(at.radio(key="type").set_value(MORTGAGE))
         self.assertTrue(at.checkbox(key="grace").value)
         self.assertEqual((at.slider(key="rate").value, at.slider(key="years").value), (2.5, 20))
         self.assertNotEqual(self.metric(at, "初期每月應繳"), self.metric(at, "寬限期後每月應繳"))
 
-        self.ok(at.radio(key="type").set_value(CREDIT).run())
+        self.change(at.radio(key="type").set_value(CREDIT))
         self.assertFalse(at.checkbox(key="grace").value)
         self.assertEqual((at.slider(key="rate").value, at.slider(key="years").value), (3.5, 7))
 
     def test_grace_period_always_stays_shorter_than_the_loan(self):
         at = self.start(type="0")
         for years, expected_max in ((6, 5), (3, 2)):
-            self.ok(at.slider(key="years").set_value(years).run())
+            self.change(at.slider(key="years").set_value(years))
             grace = at.slider(key="grace_y")
             self.assertEqual(grace.max, expected_max)
             self.assertLessEqual(grace.value, expected_max)
         # two years leaves a single possible grace length, one year leaves none
-        self.ok(at.slider(key="years").set_value(2).run())
+        self.change(at.slider(key="years").set_value(2))
         self.assertNotEqual(self.metric(at, "初期每月應繳"), self.metric(at, "寬限期後每月應繳"))
-        self.ok(at.slider(key="years").set_value(1).run())
+        self.change(at.slider(key="years").set_value(1))
         self.assertEqual(self.metric(at, "初期每月應繳"), self.metric(at, "寬限期後每月應繳"))
 
     def test_every_stress_scenario_runs_on_a_one_year_loan(self):
         at = self.start(years="1", shock="1", swan="1", jl="1", hc="1", buf="12")
         self.assertEqual(len(at.error), 0)
-        self.ok(at.radio(key="jl_mode").set_value("隨機失業模型").run())
+        self.change(at.radio(key="jl_mode").set_value("隨機失業模型"))
         self.assertEqual(len(at.error), 0)
 
     def test_repayment_sources_cannot_repeat(self):
@@ -123,7 +129,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.order(at), SOURCES)
         for slot in (1, 2, 3, 4):
             for source in at.selectbox(key=f"p{slot}").options:
-                self.ok(at.selectbox(key=f"p{slot}").set_value(source).run())
+                self.change(at.selectbox(key=f"p{slot}").set_value(source))
                 chosen = [s for s in self.order(at) if s != "（不使用）"]
                 self.assertEqual(len(chosen), len(set(chosen)), self.order(at))
 
@@ -195,10 +201,10 @@ class AppTests(unittest.TestCase):
 
     def test_address_follows_changes_and_drops_defaults(self):
         at = self.start()
-        self.ok(at.number_input(key="loan").set_value(300).run())
-        self.ok(at.checkbox(key="swan").check().run())
+        self.change(at.number_input(key="loan").set_value(300))
+        self.change(at.checkbox(key="swan").check())
         self.assertEqual(dict(at.query_params), {"loan": ["300"], "inc": ["5"], "swan": ["1"]})   # inc tells it from a V39 link
-        self.ok(at.number_input(key="loan").set_value(100).run())
+        self.change(at.number_input(key="loan").set_value(100))
         self.assertEqual(dict(at.query_params), {"swan": ["1"]})
 
     def test_black_swan_shows_once_in_the_ledger(self):
@@ -212,14 +218,16 @@ class AppTests(unittest.TestCase):
 
     def test_invalid_custom_path_is_reported_not_guessed(self):
         at = self.start(scen="3")
-        self.ok(at.text_input(key="path").set_value("5, ten, 3").run())
+        self.change(at.text_input(key="path").set_value("5, ten, 3"))
         self.assertTrue(any("參數有誤" in e.value for e in at.error))
-        self.assertEqual(len(at.metric), 0)
+        self.assertTrue(at.button(key="run_sidebar").disabled)
+        self.assertEqual(len(at.metric), 12)                       # the last good result stays below, marked old
+        self.assertIn("設定已變更", self.texts(at.warning))
 
     def test_invalid_ticker_never_reaches_the_data_source(self):
         at = self.start()
         self.load_history.reset_mock()
-        self.ok(at.text_input(key="a").set_value("../etc").run())
+        self.change(at.text_input(key="a").set_value("../etc"))
         self.assertTrue(any("格式不正確" in e.value for e in at.error))
         self.load_history.assert_not_called()
 
@@ -247,7 +255,7 @@ class AppTests(unittest.TestCase):
 
     def test_unusable_proxy_is_reported_and_ignored(self):
         at = self.start()
-        self.ok(at.text_input(key="proxy").set_value("no good").run())
+        self.change(at.text_input(key="proxy").set_value("no good"))
         self.assertIn("替身 NO GOOD 的資料無法使用", self.texts(at.warning))
         self.assertIn(MC_RUIN, [m.label for m in at.metric])
 
@@ -350,7 +358,7 @@ class AppTests(unittest.TestCase):
     def test_reload_button_asks_for_live_data_for_every_ticker_in_use(self):
         at = self.start(proxy="OLD.TW")
         with patch('market_data.request_live') as request_live:
-            self.ok(at.sidebar.button[0].click().run())
+            self.ok(next(b for b in at.sidebar.button if b.label == "重新載入行情").click().run())
         self.assertEqual(sorted(call.args[0] for call in request_live.call_args_list),
                          ["00631L.TW", "00878.TW", "OLD.TW"])
         self.assertIn(MC_RUIN, [m.label for m in at.metric])
@@ -487,9 +495,10 @@ class AppTests(unittest.TestCase):
 
     def test_invalid_rate_path_is_reported(self):
         at = self.start(**{"float": "1"})
-        self.ok(at.text_input(key="rpath").set_value("0.25, up").run())
+        self.change(at.text_input(key="rpath").set_value("0.25, up"))
         self.assertTrue(any("浮動利率路徑" in e.value for e in at.error))
-        self.assertEqual(len(at.metric), 0)
+        self.assertTrue(at.button(key="run_sidebar").disabled)
+        self.assertEqual(len(at.metric), 12)
 
     def test_dividend_frequency_follows_the_record_unless_chosen(self):
         self.assertIn("每季發一次，依這檔標的最近三年的紀錄判斷", self.texts(self.start().caption))
@@ -591,7 +600,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("破產機率地圖：借多少 × 每月自掏多少", [h for h, _, _ in parts["figures"]])
 
         with patch('report.build_report', wraps=report.build_report) as spy:
-            self.ok(at.number_input(key="loan").set_value(600).run())
+            self.change(at.number_input(key="loan").set_value(600))
         self.assertIn("設定已變更，下面的安全邊界是用舊設定算的。", self.texts(at.warning))
         parts = spy.call_args.kwargs
         self.assertEqual(dict(parts["settings"])["安全邊界"], "這次沒有計算")
@@ -785,9 +794,122 @@ class AppTests(unittest.TestCase):
 
     def test_blank_second_ticker_reinvests_everything_in_the_first(self):
         at = self.start()
-        self.ok(at.text_input(key="b").set_value("").run())
+        self.change(at.text_input(key="b").set_value(""))
         self.assertEqual(len(at.error), 0)
         self.assertEqual(at.dataframe[0].value['第二標的股數'].abs().sum(), 0)
+
+    # ---- 開始計算按鈕 ----
+
+    def counted(self):
+        return patch('engine.run_summary', wraps=__import__('engine').run_summary)
+
+    def test_settings_wait_for_the_button_and_each_press_calculates_once(self):
+        with self.counted() as calls:
+            at = self.start()
+            self.assertEqual(calls.call_count, 1)                            # first visit: one calculation, no button needed
+            self.assertNotIn("設定已變更", self.texts(at.warning))
+            shown = self.metric(at, "初期每月應繳")
+            for key, value in (("loan", 300), ("fee", 10), ("rate", 6.0)):
+                widget = at.number_input(key=key) if key != "rate" else at.slider(key=key)
+                self.ok(widget.set_value(value).run())
+            self.assertEqual(calls.call_count, 1)                            # three edits: nothing calculated
+            self.assertEqual(self.metric(at, "初期每月應繳"), shown)          # the old result stays on screen
+            self.assertIn("設定已變更，結果尚未更新。下面還是上一次計算的結果，按側欄最上方的「開始計算」更新。",
+                          self.texts(at.warning))
+            self.assertEqual(at.button(key="run_sidebar").proto.type, "primary")
+            self.ok(at.button(key="run_sidebar").click().run())
+            self.assertEqual(calls.call_count, 2)                            # one press: one calculation
+        self.assertNotEqual(self.metric(at, "初期每月應繳"), shown)
+        self.assertNotIn("設定已變更", self.texts(at.warning))
+        self.assertEqual(at.button(key="run_sidebar").proto.type, "secondary")
+
+    def test_pressing_again_resamples_only_when_the_seed_is_random(self):
+        for seed, runs in (("0", 3), ("1", 1)):
+            st.cache_data.clear()
+            with self.counted() as calls:
+                at = self.start(seed=seed)
+                for _ in range(2):
+                    self.ok(at.button(key="run_sidebar").click().run())
+            self.assertEqual(calls.call_count, runs, seed)       # random: 1 first + 2 presses; fixed: cache hit
+
+    def test_changing_a_setting_back_is_not_a_change(self):
+        at = self.start()
+        self.ok(at.number_input(key="loan").set_value(300).run())
+        self.assertIn("設定已變更", self.texts(at.warning))
+        self.ok(at.number_input(key="loan").set_value(100).run())
+        self.assertNotIn("設定已變更", self.texts(at.warning))
+
+    def test_credit_limit_inputs_count_as_settings(self):
+        at = self.start()
+        for key, value in (("inc", 8.0), ("udebt", 10.0)):
+            self.ok(at.number_input(key=key).set_value(value).run())
+            self.assertIn("設定已變更", self.texts(at.warning), key)
+            self.ok(at.number_input(key=key).set_value(5.0 if key == "inc" else 0.0).run())
+            self.assertNotIn("設定已變更", self.texts(at.warning), key)
+
+    def test_the_credit_notices_above_the_results_are_the_last_calculation(self):
+        at = self.start(loan="500", inc="5")
+        notices = [c.value for c in at.caption if c.value.startswith("依平均月收入")]
+        self.assertTrue(notices)
+        self.ok(at.number_input(key="inc").set_value(40.0).run())          # a different limit, not yet calculated
+        self.assertIn("設定已變更", self.texts(at.warning))
+        self.assertEqual([c.value for c in at.caption if c.value.startswith("依平均月收入")], notices)
+        self.assertIn("可借上限 500 萬", self.texts(at.sidebar.caption))        # the hint beside the field is live
+
+    def test_live_inputs_do_not_make_results_old(self):
+        at = self.start()
+        self.ok(at.selectbox(key="m").set_value("2019-05").run())
+        self.ok(at.segmented_control(key="tgt").set_value("1").run())
+        self.assertNotIn("設定已變更", self.texts(at.warning))
+
+    def test_auto_recalculation_brings_back_the_old_behaviour(self):
+        with self.counted() as calls:
+            at = self.start(auto="1")
+            self.assertEqual(dict(at.query_params), {"auto": ["1"]})
+            self.assertEqual([b for b in at.button if b.key == "run_sidebar"], [])
+            self.assertIn("自動重算已開啟", self.texts(at.sidebar.caption))
+            self.ok(at.number_input(key="loan").set_value(300).run())
+            self.assertEqual(calls.call_count, 2)
+            self.ok(at.checkbox(key="swan").check().run())
+            self.assertEqual(calls.call_count, 3)
+        self.assertNotIn("設定已變更", self.texts(at.warning))
+
+    def test_turning_auto_on_calculates_at_once_when_the_results_are_old(self):
+        with self.counted() as calls:
+            at = self.start()
+            self.ok(at.number_input(key="loan").set_value(300).run())
+            self.assertEqual(calls.call_count, 1)
+            self.ok(at.toggle(key="auto").set_value(True).run())
+            self.assertEqual(calls.call_count, 2)
+        self.assertNotIn("設定已變更", self.texts(at.warning))
+
+    def test_input_errors_show_at_once_and_block_the_button(self):
+        at = self.start(scen="3")
+        self.ok(at.text_input(key="path").set_value("5, ten, 3").run())
+        self.assertTrue(at.button(key="run_sidebar").disabled)
+        self.assertTrue(any("參數有誤" in e.value for e in at.error))
+        self.assertIn("設定已變更", self.texts(at.warning))                # the last good result is still below
+
+    def test_the_safety_limit_waits_for_the_results_to_catch_up(self):
+        at = self.find_limit(self.start(seed="1", loan="500"))
+        self.ok(at.number_input(key="loan").set_value(600).run())
+        self.assertTrue(at.button(key="safe_run").disabled)
+        self.assertIn("設定已變更，下面的安全邊界是用舊設定算的", self.texts(at.warning))
+        self.ok(at.button(key="run_sidebar").click().run())
+        self.assertFalse(at.button(key="safe_run").disabled)
+        with patch('engine.solve_for', wraps=__import__('engine').solve_for) as solve:
+            self.ok(at.checkbox(key="swan").check().run())
+            self.ok(at.toggle(key="auto").set_value(True).run())
+        solve.assert_not_called()                                           # the safety limit never runs by itself
+
+    def test_the_report_says_which_calculation_it_holds(self):
+        import report
+        at = self.start(loan="500")
+        self.ok(at.number_input(key="loan").set_value(300).run())
+        self.assertIn("報告內容是上一次計算的結果", self.texts(at.caption))
+        with patch('report.build_report', wraps=report.build_report) as spy:
+            self.ok(at.run())
+        self.assertIn("500 萬元", dict(spy.call_args.kwargs["settings"])["貸款"])     # the report keeps the old loan
 
 
 if __name__ == '__main__':
