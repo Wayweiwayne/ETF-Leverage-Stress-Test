@@ -631,6 +631,74 @@ class AppTests(unittest.TestCase):
                                          r"平均失業 \d+\.\d 個月）")
         self.assertNotIn("崩盤（", self.flags(self.start(jl="1", jl_mode="1", jl_crash="0")))
 
+    # ---- 使用者回饋（F2～F5） ----
+
+    def test_saving_the_results_is_one_primary_button(self):
+        at = self.start()
+        buttons = {d.proto.label: d.proto for d in at.get("download_button")}
+        self.assertEqual(buttons["📄 把這次的結果存下來"].type, "primary")
+        self.assertNotIn("把這次的結果存下來", self.texts(at.markdown))           # no heading above it any more
+        self.assertIn("也可以直接列印成 PDF。圖表需要連上網路才會顯示。", self.texts(at.caption))
+
+    def test_cash_buffer_sits_right_below_the_loan(self):
+        keys = [getattr(node, "key", None) for node in self.start().sidebar]
+        keys = [k for k in keys if k]
+        self.assertEqual(keys[keys.index("loan") + 1], "buf")
+        self.assertLess(keys.index("buf"), keys.index("type"))
+        self.assertEqual(self.start(buf="6").slider(key="buf").value, 6)          # old links still work
+
+    def test_report_works_without_a_time_zone_database(self):
+        import zoneinfo
+
+        def missing(*args, **kwargs):
+            raise zoneinfo.ZoneInfoNotFoundError("No time zone found with key Asia/Taipei")
+
+        # The fixture's own prices carry the Taipei zone, so they are made before the database goes missing.
+        histories = {t: fake_history(t) for t in ("00878.TW", "0056.TW", "00631L.TW")}
+        self.load_history.side_effect = histories.__getitem__
+        with patch("zoneinfo.ZoneInfo", side_effect=missing):
+            at, parts, _ = self.built_report(seed="1")
+        self.assertRegex(parts["generated"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}（台北時間）$")
+        self.assertEqual(len(at.error), 0)
+
+    def errors(self, at):
+        return [f"{e.proto.icon} {e.value}" if e.proto.icon else e.value for e in at.error]
+
+    def test_a_broken_report_leaves_the_rest_of_the_page(self):
+        with patch("report.build_report", side_effect=RuntimeError("boom")):
+            at = self.start()
+        self.assertEqual(self.errors(at), ["❌ 這次的報告暫時無法產生，其他結果不受影響。"])
+        self.assertIn(MC_RUIN, [m.label for m in at.metric])
+        self.assertIn("不構成任何投資建議", self.texts(at.caption))                 # the footer still runs
+        self.assertNotIn("把這次的結果存下來", [d.proto.label for d in at.get("download_button")])
+
+    def test_a_broken_part_is_replaced_by_a_plain_message_and_no_report_is_offered(self):
+        with patch("engine.run_trace", side_effect=RuntimeError("boom")):
+            at = self.start()
+        self.assertEqual(self.errors(at), ["❌ 「逐月明細」這一段暫時無法顯示，其他結果不受影響。",
+                                           "❌ 這次的報告暫時無法產生，其他結果不受影響。"])
+        self.assertIn(MC_RUIN, [m.label for m in at.metric])
+        self.assertTrue(any(d.proto.label == "📥 下載蒙地卡羅結果 (CSV)" for d in at.get("download_button")))
+
+        with patch("safety_limit.map_figure", side_effect=RuntimeError("boom")):
+            at = self.find_limit(self.start())
+        self.assertIn("❌ 「安全邊界」這一段暫時無法顯示，其他結果不受影響。", self.errors(at))
+        self.assertTrue(any(h.value.startswith("🔍 逐月明細") for h in at.header))
+
+    def test_a_failing_calculation_shows_a_plain_message(self):
+        with patch("engine.run_summary", side_effect=RuntimeError("boom")):
+            at = self.start()
+        self.assertEqual(self.errors(at), ["❌ 這次的計算暫時無法完成。可以調整設定後再試一次，或按側欄的「重新載入行情」。"])
+        self.assertIn("不構成任何投資建議", self.texts(at.caption))
+        with patch("engine.run_summary", side_effect=ValueError("貸款開辦費必須小於貸款本金。")):
+            at = self.start()
+        self.assertEqual(self.errors(at), ["❌ 參數有誤，請先修正：\n\n貸款開辦費必須小於貸款本金。"])
+
+    def test_unexpected_trouble_loading_data_is_a_plain_message(self):
+        with patch("market_data.align_months", side_effect=KeyError("Close_A")):
+            at = self.start()
+        self.assertEqual(self.errors(at), ["❌ 資料獲取異常：\n\n行情資料暫時無法處理。請稍後再試，或按側欄的「重新載入行情」。"])
+
     def test_blank_second_ticker_reinvests_everything_in_the_first(self):
         at = self.start()
         self.ok(at.text_input(key="b").set_value("").run())

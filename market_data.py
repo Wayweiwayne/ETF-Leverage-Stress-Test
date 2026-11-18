@@ -8,7 +8,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -392,8 +392,18 @@ def twse_month_distributions(period, through):
     return events
 
 
+# Taiwan has kept UTC+8 without daylight saving since 1979. A fixed offset needs no time-zone
+# database, which the in-browser build (Pyodide) does not have.
+TAIPEI = timezone(timedelta(hours=8), "Asia/Taipei")
+
+
+def taipei_now():
+    """The current time in Taiwan, as a time-zone-aware Timestamp."""
+    return pd.Timestamp.now(tz=TAIPEI)
+
+
 def _today():
-    return pd.Timestamp.now(tz="Asia/Taipei").tz_localize(None).normalize()
+    return taipei_now().tz_localize(None).normalize()
 
 
 def top_up_from_twse(snapshot, ticker):

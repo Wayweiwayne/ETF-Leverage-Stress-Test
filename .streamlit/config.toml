@@ -1,0 +1,4 @@
+[client]
+# Visitors get a short generic notice instead of the code and traceback; the details still go to
+# the server log. The single-file build reads this file too (build_standalone.py).
+showErrorDetails = "none"

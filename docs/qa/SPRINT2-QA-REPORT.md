@@ -161,3 +161,51 @@ DEF-2-01、DEF-2-02 已修正並驗證，可以關閉。修正輪沒有新的缺
 - 開辦費使破產率到 100% 的情況，依 PO 決定不另外說明，沒有寫測試。
 - 主標題目前仍是 (V39)，依 PO 補充，版號在發布時才改；測試比對的是 `APP_VERSION`。
 - 單機版效能（D9：30 秒內）仍待使用者在瀏覽器量測。
+
+---
+
+## 7. 使用者回饋修正輪（F1～F5）
+
+- 日期：2026-11-18
+- 受測對象：工作目錄中 RD 的修正（`main_page.py`、`market_data.py`、`pages/1_Model_Details.py`、`build_standalone.py`、新增 `.streamlit/config.toml`；單機檔 02:44 UTC 重新產生）
+- 驗收測試：`test_acceptance_fix2.py`（10 個，測試先行；RD 完成前 5 個失敗，屬於預期）
+
+### 7.1 結果
+
+| 項目 | 結果 |
+|---|---|
+| `test_acceptance_fix2` | 10 個全部通過 |
+| 其他驗收測試（`test_acceptance_27`、`_27_ui`、`_38`） | 全部通過（包含在下一列） |
+| `.venv/bin/python -m unittest`（全部） | 446 個全部通過（約 205 秒） |
+| `pyflakes *.py pages/*.py` | 沒有警告 |
+| `build_standalone.py --check` | 單機檔是最新的 |
+| 瀏覽器實機（埠 8602） | 符合，見 7.3 |
+
+本輪沒有缺陷。
+
+**D9 關閉**：使用者實測，單機版的安全邊界約 25 秒，達到「30 秒內」的目標。
+
+### 7.2 驗收條件與測試
+
+| 項目 | 驗收條件 | 測試 |
+|---|---|---|
+| F1 | 說明頁不再出現「吸收邊界」「後面就算市場大漲也跟你無關了」「白話總結」；破產那段以「……這個策略就判定破產。」結尾；有「白話：」 | `DetailsPageWordingTests.test_section_one_wording` |
+| F2 | 模擬沒有時區資料庫時，App 跑完、報告照常產生；產生時間與檔名日期是 UTC+8；App 程式碼（不含測試）不再出現 `tz="Asia/Taipei"` | `TimeZoneTests` 3 個。模擬方式是清空 `zoneinfo` 的搜尋路徑、讓 `tzdata` 無法 import、清掉 ZoneInfo 快取，這和 Pyodide 沒有 tzdata 的情況相同；另有一個前提測試，確認這樣做之後 `pd.Timestamp.now(tz="Asia/Taipei")` 確實丟出 `ZoneInfoNotFoundError` |
+| F3 | `.streamlit/config.toml` 的 `client.showErrorDetails = "none"`；單機檔的 `mount(...)` 有同樣的選項；`report.build_report` 丟例外時沒有例外、只有一句含「報告」的白話錯誤，而且不洩漏錯誤內容，其他指標與 CSV 下載照常 | `ErrorDetailTests` 3 個 |
+| F4 | 不再有「把這次的結果存下來」小標題；只有一顆「📄 把這次的結果存下來」下載按鈕，type 是 primary；檔名 `stress_test_{代號}_{YYYYMMDD}.html`，內容是報告；舊按鈕「📄 下載這次的報告 (HTML)」不再出現；按鈕下方緊接一句 caption | `SaveButtonTests.test_save_is_a_primary_download_button` |
+| F5 | 側欄中「貸款本金 (萬)」的下一個欄位是 `buf`，位置在「1. 貸款條件」之後、「2.」之前；舊連結 `?buf=3`：值是 3、緩衝金 $201,597（3 × $67,199，和 V39 相同），網址不變 | `BufferPlacementTests` 2 個；另外 `test_acceptance_38` 的 V39 舊連結（含 `buf=3` 的 stress 連結）仍完全相同 |
+
+### 7.3 瀏覽器實機（埠 8602，真實行情，用完已關閉）
+
+截圖：`/tmp/claude-0/-home-user-ETF-Leverage-Stress-Test/d9762379-1ffe-5f59-9687-fb97862f21dd/scratchpad/qa/r3/`
+
+| 檢查 | 截圖 | 結果 |
+|---|---|---|
+| 側欄順序（F5） | `sidebar_light.png`、`sidebar_dark.png` | 「1. 貸款條件」→「貸款本金 (萬)」→「一開始預留幾個月的還款現金」（`?buf=3` 帶入 3）→「貸款種類」；緩衝金 $201,597 |
+| 存檔按鈕（F4） | `save_button_light.png`、`save_button_dark.png` | 紅色 primary 按鈕「📄 把這次的結果存下來」，下面一句說明。實際按下後下載了 `stress_test_00878.TW_20261118.html`（同目錄的 `light_…html`、`dark_…html`），報告時間是「2026-11-18 10:46（台北時間）」，與台北時間一致 |
+| 說明頁第一節（F1） | `details_section1_light.png`、`details_section1_dark.png` | 破產那段以「這個策略就判定破產。」結尾；藍框以「白話：」開頭 |
+
+### 7.4 觀察（不是缺陷）
+
+- 有了 `.streamlit/config.toml` 之後，AppTest 讀到的例外內容也會變成 Streamlit 的通用訊息（「This app has encountered an error…」），所以之後測試失敗時，例外內容比較難直接從測試輸出看出來。要看詳細內容，RD 或 QA 可以在本機暫時調整設定，或直接看終端機的記錄。
+- 報告產生失敗時，錯誤細節寫在伺服器端的記錄（stderr），畫面上看不到。這符合 F3。

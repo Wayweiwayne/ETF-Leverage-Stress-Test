@@ -12,6 +12,7 @@ the embedded snapshots.
 import json
 import os
 import sys
+import tomllib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT = os.path.join(HERE, "dist", "ETF-Leverage-Stress-Test.html")
@@ -49,7 +50,8 @@ const boot = document.getElementById("boot");
 new MutationObserver((_, observer) => {
   if (document.querySelector("#root [data-testid]")) { boot.remove(); observer.disconnect(); }
 }).observe(document.getElementById("root"), { childList: true, subtree: true });
-mount({ requirements: __REQUIREMENTS__, entrypoint: "app.py", files }, document.getElementById("root"));
+mount({ requirements: __REQUIREMENTS__, entrypoint: "app.py", files, streamlitConfig: __CONFIG__ },
+      document.getElementById("root"));
 </script>
 </body>
 </html>
@@ -68,6 +70,13 @@ def collect_files():
     return files
 
 
+def streamlit_config():
+    """The server's .streamlit/config.toml as the "section.option" pairs stlite takes in mount()."""
+    with open(os.path.join(HERE, ".streamlit", "config.toml"), "rb") as fh:
+        sections = tomllib.load(fh)
+    return {f"{section}.{name}": value for section, options in sections.items() for name, value in options.items()}
+
+
 def _script_json(value):
     """JSON that is safe inside a <script> element."""
     text = json.dumps(value, ensure_ascii=False, indent=None, separators=(",", ":"))
@@ -78,7 +87,8 @@ def build():
     sys.path.insert(0, HERE)
     from version import APP_VERSION
     return (TEMPLATE.replace("__VERSION__", APP_VERSION).replace("__STLITE__", STLITE_VERSION)
-            .replace("__REQUIREMENTS__", _script_json(REQUIREMENTS)).replace("__FILES__", _script_json(collect_files())))
+            .replace("__REQUIREMENTS__", _script_json(REQUIREMENTS)).replace("__CONFIG__", _script_json(streamlit_config()))
+            .replace("__FILES__", _script_json(collect_files())))
 
 
 def main(argv):

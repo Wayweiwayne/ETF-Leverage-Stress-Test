@@ -67,6 +67,13 @@ class StandaloneBuildTests(unittest.TestCase):
         self.assertEqual(self.html.count(f"@stlite/browser@{build_standalone.STLITE_VERSION}/build/"), 2)
         self.assertNotIn("yfinance", json.dumps(build_standalone.REQUIREMENTS))
 
+    def test_visitors_never_see_tracebacks_in_either_build(self):
+        import tomllib
+        with open(".streamlit/config.toml", "rb") as fh:
+            self.assertEqual(tomllib.load(fh)["client"]["showErrorDetails"], "none")
+        embedded = json.loads(re.search(r"streamlitConfig: (\{.*?\}) \}", self.html).group(1))
+        self.assertEqual(embedded, {"client.showErrorDetails": "none"})
+
     def run_unpacked(self, **query):
         with tempfile.TemporaryDirectory() as folder:
             for path, text in self.files.items():
