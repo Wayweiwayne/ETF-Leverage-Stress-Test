@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT = os.path.join(HERE, "dist", "ETF-Leverage-Stress-Test.html")
 STLITE_VERSION = "1.12.0"
 APP_FILES = ["app.py", "main_page.py", "pages/1_Model_Details.py", "engine.py", "market_data.py",
-             "report.py", "safety_limit.py", "ui_state.py", "version.py", "data/mirror_tickers.txt"]
+             "report.py", "credit_limit.py", "safety_limit.py", "ui_state.py", "version.py", "data/mirror_tickers.txt"]
 # Pure-Python packages fetched from PyPI; numpy and pandas come with Pyodide itself.
 REQUIREMENTS = ["plotly==6.7.0"]
 

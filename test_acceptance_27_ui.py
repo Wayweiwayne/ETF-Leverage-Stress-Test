@@ -94,6 +94,8 @@ def fake_solver(results):
 
 
 class SafetyHarness(AppHarness):
+    BASE_QUERY = {"loan": "500"}   # S46：預設本金改為 100 萬，這裡沿用 V39 的 500 萬情境
+
     def control(self, at):
         for kind in ("segmented_control", "radio"):
             for w in getattr(at, kind):

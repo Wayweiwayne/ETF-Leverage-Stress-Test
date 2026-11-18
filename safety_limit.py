@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+import credit_limit
 import engine
 
 TARGETS = ("1", "5", "10")  # percent; a link stores the number itself
@@ -63,11 +64,16 @@ STEPS = ("（1/3）找最多能借多少…", "（2/3）找每月最少要自掏
 CURRENT_MARK = "◆ 目前"
 
 
-def principal_bounds(principal, loan_fee):
-    """Search range for the loan: from the first multiple of 100,000 above the fee to ten times the loan."""
+def principal_bounds(principal, loan_fee, cap=None):
+    """Search range for the loan: from the first multiple of 100,000 above the fee to ten times the loan.
+
+    A borrowing limit `cap` (dollars) lowers the top to the last multiple of 100,000 within it.
+    """
     lo = max(PRINCIPAL_STEP, (int(loan_fee) // PRINCIPAL_STEP + 1) * PRINCIPAL_STEP)
-    hi = max(lo, min(principal * 10, PRINCIPAL_CEILING))
-    return float(lo), float(hi)
+    hi = min(principal * 10, PRINCIPAL_CEILING)
+    if cap is not None:
+        hi = min(hi, cap // PRINCIPAL_STEP * PRINCIPAL_STEP)
+    return float(lo), float(max(lo, hi))
 
 
 def _round_half_up(value):
@@ -85,15 +91,18 @@ def map_axes(principal, salary_cap):
     return principals, _unique(float(c) for c in caps)
 
 
-def compute(df, params, target, on_step=None):
+def compute(df, params, target, on_step=None, cap=None):
     """Find both limits and the risk map for `params` at a target of `target` percent.
+
+    `cap` is the borrowing limit in dollars, when there is one: the search stops there and
+    map rows above it are left empty.
 
     `on_step(fraction, text)` is called before each stage. The result holds everything needed
     to show it again later, after the settings have moved on.
     """
     step = on_step or (lambda fraction, text: None)
     rate = int(target) / 100
-    lo, hi = principal_bounds(params.principal, params.loan_fee)
+    lo, hi = principal_bounds(params.principal, params.loan_fee, cap)
     step(0.0, STEPS[0])
     principal = engine.solve_for(df, params, "principal", rate, lo, hi, PRINCIPAL_STEP)
     salary = None
@@ -103,13 +112,13 @@ def compute(df, params, target, on_step=None):
     principals, caps = map_axes(params.principal, params.salary_cap)
     step(2 / 3, STEPS[2].format(n=len(principals) * len(caps)))
     # A loan the fee would swallow whole cannot be simulated; its row stays empty.
-    usable = [p for p in principals if p > params.loan_fee]
+    usable = [p for p in principals if p > params.loan_fee and (cap is None or p <= cap)]
     grid = pd.DataFrame(np.nan, index=principals, columns=caps)
     if usable:
         grid.loc[usable] = engine.sensitivity_grid(df, params, usable, caps, mc_paths=params.mc_paths).to_numpy()
     return {"target": str(target), "paths": int(params.mc_paths), "seed_is_random": params.seed is None,
             "salary_in_order": engine.SALARY in params.source_order,
-            "principal": principal, "salary": salary, "lo": lo, "hi": hi,
+            "principal": principal, "salary": salary, "lo": lo, "hi": hi, "cap": cap, "loan_fee": float(params.loan_fee),
             "current_principal": float(params.principal), "current_salary": float(params.salary_cap), "grid": grid}
 
 
@@ -160,6 +169,13 @@ def principal_view(record):
     res, t = record["principal"], target_text(record["target"])
     cur, r, n = record["current_principal"], ruin_text(record["principal"].ruin_rate, record["target"]), record["paths"]
     no_support = NO_SUPPORT.format(hi=wan(record["hi"]), lo=wan(record["lo"]))
+    if res.status == "all_meet" and record.get("cap") is not None:
+        wan_cap = credit_limit.wan_text(record["cap"] / 10_000)
+        caption = (ALL_MEET_SCALES.format(t=t) if has_salary_support(record)
+                   else no_support + ALL_MEET_NO_SUPPORT.format(t=t))
+        return _view("最多可以借", credit_limit.SAFE_VALUE.format(cap=wan_cap),
+                     credit_limit.SAFE_SENTENCE.format(cap=wan_cap, r=r, t=t, cur=wan(cur)), "success",
+                     [caption + LOW_IS_NOT_SAFE])
     if res.status == "all_meet":
         caption = (ALL_MEET_SCALES.format(t=t) if has_salary_support(record)
                    else no_support + ALL_MEET_NO_SUPPORT.format(t=t))
@@ -237,10 +253,33 @@ def _band_ticks(target):
             f"{BAND_NAMES[3]}（> {c}）"]
 
 
+def over_cap_rows(record):
+    """Which map rows borrow more than the limit (the fee rule comes first: those rows show "—")."""
+    cap, fee = record.get("cap"), record.get("loan_fee", 0)
+    return [cap is not None and p > cap and p > fee for p in record["grid"].index]
+
+
 def map_cells(record):
-    """Text of every cell: the ruin rate, "—" where it could not be computed, the current one marked."""
+    """Text of every cell: the ruin rate, "—" where it could not be computed, the current one marked.
+
+    Rows above the borrowing limit read "超限".
+    """
     grid, target, here = record["grid"], record["target"], _current_cell(record)
-    return [[ruin_text(v, target) for v in row] for row in grid.to_numpy()], here
+    over = over_cap_rows(record)
+    return [[credit_limit.HEAT_CELL if over[i] else ruin_text(v, target) for v in row]
+            for i, row in enumerate(grid.to_numpy())], here
+
+
+def _blank_hover(record, y_labels, over):
+    """Hover of the grey layer: the fee reason alone, or per row when some rows are over the limit."""
+    fee_text = "貸款本金 {y} 不比開辦費多，無法計算"
+    if not any(over):
+        return {"hovertemplate": fee_text.replace("{y}", "%{y}") + "<extra></extra>"}
+    cap = credit_limit.wan_text(record["cap"] / 10_000)
+    return {"hovertemplate": "%{hovertext}<extra></extra>",
+            "hovertext": [[credit_limit.HEAT_HOVER.format(y=y_labels[i], cap=cap) if over[i]
+                           else fee_text.format(y=y_labels[i]) for _ in range(len(record["grid"].columns))]
+                          for i in range(len(y_labels))]}
 
 
 def map_figure(record):
@@ -248,6 +287,7 @@ def map_figure(record):
     y_labels, x_labels = _labels(record)
     cells, here = map_cells(record)
     blank = grid.isna().to_numpy()
+    over = over_cap_rows(record)
     text = [["" if blank[i, j] else cell + (f"<br>{CURRENT_MARK}" if (i, j) == here else "")
              for j, cell in enumerate(row)] for i, row in enumerate(cells)]
     z = [[None if v != v else v for v in row] for row in bands(grid.to_numpy(), target).tolist()]
@@ -260,9 +300,9 @@ def map_figure(record):
         fig.add_trace(go.Heatmap(
             z=[[0 if b else None for b in row] for row in blank], x=x_labels, y=y_labels, zmin=0, zmax=1,
             colorscale=[[0, BLANK_COLOR], [1, BLANK_COLOR]], showscale=False, xgap=2, ygap=2, hoverongaps=False,
-            text=[["—" if b else "" for b in row] for row in blank], texttemplate="%{text}",
-            textfont=dict(color=BLANK_TEXT_COLOR),
-            hovertemplate="貸款本金 %{y} 不比開辦費多，無法計算<extra></extra>"))
+            text=[[credit_limit.HEAT_CELL if over[i] else "—" if b else "" for b in row] for i, row in enumerate(blank)],
+            texttemplate="%{text}", textfont=dict(color=BLANK_TEXT_COLOR),
+            **_blank_hover(record, y_labels, over)))
     fig.add_trace(go.Heatmap(
         z=z, x=x_labels, y=y_labels, zmin=-0.5, zmax=3.5, colorscale=scale, text=text, texttemplate="%{text}",
         customdata=cells, xgap=2, ygap=2, hoverongaps=False,
@@ -293,7 +333,17 @@ def map_note(record):
 
 
 def has_blank_cells(record):
-    return bool(record["grid"].isna().to_numpy().any())
+    """Whether some cell is empty because the fee swallows the loan."""
+    over = over_cap_rows(record)
+    return any(blank and not over[i] for i, blank in enumerate(record["grid"].isna().to_numpy().any(axis=1)))
+
+
+def has_over_cap_rows(record):
+    return any(over_cap_rows(record))
+
+
+def over_cap_note(record):
+    return credit_limit.HEAT_NOTE.format(cap=credit_limit.wan_text(record["cap"] / 10_000))
 
 
 def map_salary_note(record):
@@ -340,4 +390,6 @@ def report_table_note(record):
              map_note(record)]
     if has_blank_cells(record):
         parts.append(MAP_NOTE_FEE)
+    if has_over_cap_rows(record):
+        parts.append(over_cap_note(record))
     return "".join(parts)

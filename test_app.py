@@ -73,9 +73,16 @@ class AppTests(unittest.TestCase):
         at = self.start()
         self.assertIn(f"({APP_VERSION})", at.title[0].value)
         self.assertEqual(len(at.error), 0)
-        self.assertEqual(self.metric(at, "初期每月應繳"), "$67,199")
+        self.assertEqual(self.metric(at, "初期每月應繳"), "$13,439")        # 100 萬 since V40; 500 萬 gave $67,199
+        self.assertEqual(self.metric(at, "初期每月應繳"), self.metric(self.start(loan="100", inc="5"), "初期每月應繳"))
         self.assertIn(MC_RUIN, [m.label for m in at.metric])
         self.assertEqual(dict(at.query_params), {})
+
+    def test_a_link_from_v39_with_a_loan_keeps_its_numbers(self):
+        at = self.start(loan="500")
+        self.assertEqual(self.metric(at, "初期每月應繳"), "$67,199")
+        self.assertEqual(at.number_input(key="inc").value, 0)             # no income: nothing is checked
+        self.assertEqual(at.query_params["inc"], ["0"])
 
     def test_credit_loan_defaults_to_no_grace_and_mortgage_to_grace(self):
         at = self.start()
@@ -190,8 +197,8 @@ class AppTests(unittest.TestCase):
         at = self.start()
         self.ok(at.number_input(key="loan").set_value(300).run())
         self.ok(at.checkbox(key="swan").check().run())
-        self.assertEqual(dict(at.query_params), {"loan": ["300"], "swan": ["1"]})
-        self.ok(at.number_input(key="loan").set_value(500).run())
+        self.assertEqual(dict(at.query_params), {"loan": ["300"], "inc": ["5"], "swan": ["1"]})   # inc tells it from a V39 link
+        self.ok(at.number_input(key="loan").set_value(100).run())
         self.assertEqual(dict(at.query_params), {"swan": ["1"]})
 
     def test_black_swan_shows_once_in_the_ledger(self):
@@ -263,7 +270,7 @@ class AppTests(unittest.TestCase):
         return at, spy.call_args.kwargs, report.build_report(**spy.call_args.kwargs)
 
     def test_report_gathers_what_the_page_shows(self):
-        at, parts, html = self.built_report(salary="15000", swan="1", swan_m="18", swan_d="35", seed="1", m="2020-03")
+        at, parts, html = self.built_report(loan="500", salary="15000", swan="1", swan_m="18", swan_d="35", seed="1", m="2020-03")
         settings = dict(parts["settings"])
         self.assertIn("500 萬元｜一般信貸", settings["貸款"])
         self.assertIn("無寬限期", settings["貸款"])
@@ -391,7 +398,7 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("次破產的模擬裡", self.texts(self.start().caption))
 
     def test_out_of_pocket_and_annual_return_table(self):
-        at = self.start(seed="1")
+        at = self.start(seed="1", loan="500")
         table = at.table[1].value
         self.assertEqual(list(table.columns), ["槓桿策略", "定期定額對照組"])
         self.assertEqual(table.index[0], "整段期間自掏腰包的總額（中位數）")
@@ -530,7 +537,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(dict(spy.call_args.kwargs["settings"])["安全邊界"], "這次沒有計算")
 
     def test_safety_limit_answers_and_map(self):
-        at = self.find_limit(self.start(seed="1"))
+        at = self.find_limit(self.start(seed="1", loan="500"))
         labels = {m.label: m for m in at.metric}
         self.assertEqual(labels["最多可以借"].value, "5,000 萬以上")         # the fixture market is kind
         self.assertEqual(labels["每月最少要自掏"].value, "$0")
@@ -545,7 +552,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("◆ 目前", figure["data"][0]["text"][2][2])
 
     def test_safety_limit_with_a_tight_budget(self):
-        at = self.find_limit(self.start(salary="5000", rate="8", seed="1", tgt="1"))
+        at = self.find_limit(self.start(loan="500", salary="5000", rate="8", seed="1", tgt="1"))
         self.assertEqual(at.segmented_control(key="tgt").value, "1")
         principal = self.metric(at, "最多可以借")
         self.assertRegex(principal, r"^[\d,]+ 萬$")
@@ -564,7 +571,7 @@ class AppTests(unittest.TestCase):
 
     def test_old_safety_limit_is_marked_and_left_out_of_the_report(self):
         import report
-        at = self.find_limit(self.start(seed="1"))
+        at = self.find_limit(self.start(seed="1", loan="500"))
         self.ok(at.segmented_control(key="tgt").set_value("10").run())
         self.assertIn("你改了能接受的破產機率，下面還是 5% 的結果。", self.texts(at.warning))
         self.assertIn("最多可以借", [m.label for m in at.metric])              # the old answer stays on screen
@@ -609,7 +616,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue((rows == rows[:, :1]).all())                         # the cap changes nothing
 
     def test_safety_limit_with_fresh_draws_and_a_big_fee(self):
-        at = self.find_limit(self.start(seed="0", lfee="3000000"))
+        at = self.find_limit(self.start(loan="500", seed="0", lfee="3000000"))
         self.assertIn("你關閉了「固定亂數」，安全邊界固定用同一組抽樣計算", self.texts(at.caption))
         self.assertEqual(list(at.table[0].value.iloc[0]), ["—"] * 6)       # 250 萬 does not cover the fee
         self.assertIn("「—」的格子", self.texts(at.caption))
@@ -644,7 +651,7 @@ class AppTests(unittest.TestCase):
         keys = [getattr(node, "key", None) for node in self.start().sidebar]
         keys = [k for k in keys if k]
         self.assertEqual(keys[keys.index("loan") + 1], "buf")
-        self.assertLess(keys.index("buf"), keys.index("type"))
+        self.assertLess(keys.index("type"), keys.index("loan"))                 # the kind comes first since V40
         self.assertEqual(self.start(buf="6").slider(key="buf").value, 6)          # old links still work
 
     def test_report_works_without_a_time_zone_database(self):

@@ -40,7 +40,7 @@ def _frame_table(frame):
 
 
 def build_report(*, title, version, generated, share_url, settings, data_notes, warnings, summaries,
-                 tables, figures, disclaimer, source_url):
+                 tables, figures, disclaimer, source_url, closing_notes=()):
     """Return the report as one HTML document.
 
     settings   -- [(label, value)] describing the run
@@ -49,6 +49,7 @@ def build_report(*, title, version, generated, share_url, settings, data_notes, 
     summaries  -- [(heading, [(label, value)])], laid out side by side
     tables     -- [(heading, DataFrame of display strings, caption)]
     figures    -- [(heading, plotly figure, caption)]; charts load plotly from its CDN
+    closing_notes -- [text] added to the footer
     """
     parts = [
         "<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>",
@@ -87,7 +88,8 @@ def build_report(*, title, version, generated, share_url, settings, data_notes, 
     if data_notes:
         parts.append("<h2>使用的資料</h2><ul>" + "".join(f"<li>{escape(text)}</li>" for text in data_notes) + "</ul>")
 
-    parts.append(f"<div class='footer'><p>{escape(disclaimer)}</p>"
+    parts.append("<div class='footer'>" + "".join(f"<p>{escape(text)}</p>" for text in closing_notes)
+                 + f"<p>{escape(disclaimer)}</p>"
                  f"<p>本程式為自由軟體，以 AGPL-3.0 授權，不提供任何擔保。原始碼："
                  f"<a href='{escape(source_url, quote=True)}'>{escape(source_url)}</a></p></div>")
     parts.append("</body></html>")

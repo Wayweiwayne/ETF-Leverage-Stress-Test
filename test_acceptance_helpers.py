@@ -45,7 +45,10 @@ class AppHarness:
             self.addCleanup(patcher.stop)
         market_data._index_cache.update(at=float("-inf"), entries=None)
 
+    BASE_QUERY = {}   # 衝刺 2.5 之後預設本金改成 100 萬；測 V39 情境的測試類別設 {"loan": "500"}
+
     def start(self, **query):
+        query = {**self.BASE_QUERY, **query}
         at = AppTest.from_file(APP, default_timeout=180)
         for key, value in query.items():
             at.query_params[key] = value

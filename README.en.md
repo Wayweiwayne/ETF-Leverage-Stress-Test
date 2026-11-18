@@ -32,6 +32,7 @@ The first month in which the payment cannot be covered, the strategy is **ruined
 - **Dividend model** — payouts rise and fall with the market (dividend beta), with a floor during crashes, paid monthly, quarterly, half-yearly or yearly.
 - **Taxes and fees** — transaction tax, the health-insurance levy on dividends, dividend income tax and a loan origination fee, defaulting to Taiwan's current rates.
 - **Safety margin** — works backwards: with everything else unchanged, the largest loan, or the smallest monthly top-up, that keeps the chance of default under a limit you pick (1%, 5% or 10%), plus a map of the default rate for loan size × monthly top-up.
+- **Personal-loan limit** — for an unsecured personal loan, enter your average monthly income and the app estimates how much you can borrow under Taiwan's 22-times-monthly-income cap on unsecured debt; a larger amount is capped, and the app says so.
 - **Repayment waterfall** — salary, dividend pool, cash buffer, selling the main asset and selling the second asset are drawn in the order you choose, and ruin is declared only when all are spent; any of them can be left out.
 - **Fire-sale discount** — forced selling in a crash month costs extra.
 - **Leveraged-ETF compounding and volatility decay** — months in which the second asset has no real data are modelled from the first with the standard leveraged-fund formula, without projecting any excess return it earned in the sample.

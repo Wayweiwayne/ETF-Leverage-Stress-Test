@@ -13,10 +13,22 @@ import streamlit as st
 _STORE = "_settings"  # key -> serialised value, for every input that differs from its default
 
 
-def begin():
-    """Call at the top of the page, before any input is drawn."""
+def begin(migrate=None):
+    """Call at the top of the page, before any input is drawn.
+
+    `migrate(settings)` may rewrite the settings read from an old link; it runs once per session,
+    on the first load only.
+    """
     if _STORE not in st.session_state:
-        st.session_state[_STORE] = {k: st.query_params[k] for k in st.query_params}
+        store = {k: st.query_params[k] for k in st.query_params}
+        if migrate is not None:
+            migrate(store)
+        st.session_state[_STORE] = store
+
+
+def pin(key, value):
+    """Write `key` into the address bar even when it equals its default."""
+    st.session_state[_STORE][key] = _fmt(value)
 
 
 def end():

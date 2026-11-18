@@ -9,6 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+import credit_limit as credit
 import engine
 import report
 import safety_limit as safe
@@ -173,19 +174,36 @@ def ruin_year_chart(ruin_months, total_months):
     return fig
 
 
+LOAN_KIND = {LOAN_TYPES[0]: "mortgage", LOAN_TYPES[1]: "credit"}
+LOAN_SHORT_NAME = {LOAN_TYPES[0]: "理財型房貸", LOAN_TYPES[1]: "一般信貸"}
+TOAST_KEY = "_loan_type_toast"
+
+
 def reset_loan_defaults():
-    ui.forget("rate", "years", "grace", "grace_y")
+    """Switching the loan type brings the new type's defaults, the amount included."""
+    ui.forget("rate", "years", "grace", "grace_y", "loan")
+    new_type = st.session_state.get("type")
+    if new_type in LOAN_DEFAULTS:
+        rate, years, grace = LOAN_DEFAULTS[new_type]
+        st.session_state[TOAST_KEY] = credit.switch_toast(
+            LOAN_SHORT_NAME[new_type], credit.DEFAULT_PRINCIPAL[LOAN_KIND[new_type]], rate, years, 3 if grace else 0)
+
+
+def migrate_old_link(settings):
+    """A link made before the income field existed keeps its numbers: no income, so no limit check."""
+    if credit.is_legacy_link(settings):
+        settings["inc"] = "0"
 
 
 SAFE_STATE = "_safety_limit"  # the last safety limit found, with the settings it was found for
 
 
-def show_safety_limit(record, data, params, mc_ok, snapshot, results_stale=False):
+def show_safety_limit(record, data, params, mc_ok, snapshot, results_stale=False, cap=None):
     """The safety-limit block: computed only when asked, then kept until the settings move on.
 
     `snapshot` identifies everything the search depends on. `results_stale` means the results
     above no longer match the sidebar; a search then has to wait for them, since it always uses
-    their settings. What is shown and found goes into the report `record` only while it is current.
+    their settings. `cap` is the borrowing limit in dollars, if the credit check is on. What is shown and found goes into the report `record` only while it is current.
     """
     st.header(safe.HEADER, anchor=safe.ANCHOR)
     st.caption(safe.INTRO)
@@ -206,7 +224,7 @@ def show_safety_limit(record, data, params, mc_ok, snapshot, results_stale=False
     if clicked and not blocked:
         bar = st.progress(0.0, text=safe.STEPS[0])
         try:
-            found = safe.compute(data, params, target, on_step=lambda done, text: bar.progress(done, text=text))
+            found = safe.compute(data, params, target, on_step=lambda done, text: bar.progress(done, text=text), cap=cap)
             st.session_state[SAFE_STATE] = {"snapshot": snapshot, "record": found}
         except ValueError as exc:
             st.error(f"❌ 無法計算安全邊界：{exc}")
@@ -243,6 +261,8 @@ def show_safety_limit(record, data, params, mc_ok, snapshot, results_stale=False
     st.caption(safe.MAP_NOTE_2)
     if safe.has_blank_cells(found):
         st.caption(safe.MAP_NOTE_FEE)
+    if safe.has_over_cap_rows(found):
+        st.caption(safe.over_cap_note(found))
     table = safe.map_table(found)
     with st.expander(safe.TABLE_TITLE):
         st.table(table)
@@ -258,7 +278,7 @@ def show_safety_limit(record, data, params, mc_ok, snapshot, results_stale=False
         record["settings"].append(("安全邊界", "這次沒有計算"))
 
 
-ui.begin()
+ui.begin(migrate=migrate_old_link)
 
 st.title(f"借錢投資 ETF 壓力測試 ({APP_VERSION})")
 st.caption("📖 每個欄位旁的問號有白話說明；想看公式和計算方式，點側欄最上方的「計算方法說明」。")
@@ -274,13 +294,66 @@ input_errors = []
 
 with st.sidebar:
     st.header("1. 貸款條件")
-    loan_principal = ui.number("loan", "貸款本金 (萬)", 500, 50, min_value=1, max_value=100000,
-                               help="你打算借多少錢來投資。例如填 500 就是借 500 萬。") * 10000
-    buffer_months = ui.slider("buf", "一開始預留幾個月的還款現金", 0, 12, 0,
-                              help="開局時先留一筆現金當「緩衝」，相當於先存好幾個月的還款。留越多越安全，但能投入市場的本金就越少。")
     loan_type = ui.choice("type", "貸款種類", LOAN_TYPES, LOAN_TYPES[1], widget=st.radio,
                           on_change=reset_loan_defaults,
                           help="房貸通常利率低、可以借很多年，但需要拿房子抵押；信貸不用抵押品，但利率較高、年限較短。")
+    if toast := st.session_state.pop(TOAST_KEY, None):
+        st.toast(toast, icon="ℹ️")
+    loan_kind = LOAN_KIND[loan_type]
+    # Credit fields exist only for a personal loan; a mortgage is secured and not bound by the 22x rule.
+    limits, entered_wan, lmode = None, None, 0
+    if loan_kind == "credit":
+        income = ui.number("inc", credit.LABELS["inc"], credit.DEFAULT_INCOME, 0.5, min_value=0.0, max_value=1000.0,
+                           format="%g", help=credit.HELP_INCOME)
+        if income <= 0:
+            st.caption(credit.L11)
+        elif income < credit.MIN_YEARLY_INCOME / 12:
+            st.warning(credit.L07.format(yearly=credit.wan_text(income * 12)))
+        if income > 0:
+            debt = ui.number("udebt", credit.LABELS["udebt"], credit.DEFAULT_DEBT, 0.5, min_value=0.0,
+                             max_value=10000.0, format="%g", help=credit.HELP_DEBT)
+            st.session_state.setdefault("_credit_open", "mult" in ui.settings() or "pmax" in ui.settings())
+            with st.expander(credit.EXPANDER, expanded=st.session_state["_credit_open"]):
+                multiple = ui.number("mult", credit.LABELS["mult"], credit.DEFAULT_MULTIPLE, 1,
+                                     min_value=credit.MULTIPLE_RANGE[0], max_value=credit.MULTIPLE_RANGE[1],
+                                     help=credit.HELP_MULTIPLE)
+                product_max = ui.number("pmax", credit.LABELS["pmax"], credit.DEFAULT_PRODUCT_MAX, 50,
+                                        min_value=100, max_value=2000, help=credit.HELP_PRODUCT_MAX)
+            limits = credit.assess(income, debt, multiple, product_max)
+            lmode = ui.choice("lmode", credit.LABELS["lmode"], credit.LMODE_OPTIONS, credit.LMODE_OPTIONS[0],
+                              widget=st.radio, help=credit.HELP_LMODE)
+            lmode = credit.LMODE_OPTIONS.index(lmode)
+    estimated = limits is not None and lmode == 1
+    loan_help = credit.HELP_LOAN[loan_kind] if loan_kind == "credit" else "你打算借多少錢來投資。例如填 300 就是借 300 萬。"
+    if estimated:
+        st.number_input("貸款本金 (萬)", min_value=0.0, max_value=100000.0, value=float(limits.approvable), step=10.0,
+                        format="%g", disabled=True, help=loan_help + credit.HELP_LOAN_ESTIMATED)
+    else:
+        entered_wan = ui.number("loan", "貸款本金 (萬)", credit.DEFAULT_PRINCIPAL[loan_kind], credit.LOAN_STEP[loan_kind],
+                                min_value=1, max_value=100000, help=loan_help)
+        # A link that names the amount must also name the income, or it would read as a V39 link.
+        if loan_kind == "credit" and "loan" in ui.settings():
+            ui.pin("inc", income)
+    if limits is not None:
+        if limits.cap <= 0:
+            st.error(credit.exhausted_notice(limits))
+            input_errors.append(credit.L08_ERROR)
+        elif estimated and limits.approvable <= 0:
+            st.error(credit.L09)
+            input_errors.append(credit.L09_ERROR)
+        elif not estimated and entered_wan > limits.cap:
+            st.warning(credit.L02.format(cap=credit.wan_text(limits.cap)))
+        if limits.cap > 0:
+            st.caption(credit.L04.format(cap=credit.wan_text(limits.cap), z=credit.wan_text(limits.approvable)))
+    loan_wan = credit.adopted_principal(limits, entered_wan if entered_wan is not None else 0, estimated)
+    if loan_wan <= 0:                    # no loan can be made; the error above stops the run
+        loan_wan = entered_wan or 1
+    loan_principal = loan_wan * 10000
+    borrow_cap = limits.cap * 10000 if limits is not None and limits.cap > 0 else None
+    if loan_kind == "credit":
+        st.info(credit.L12)
+    buffer_months = ui.slider("buf", "一開始預留幾個月的還款現金", 0, 12, 0,
+                              help="開局時先留一筆現金當「緩衝」，相當於先存好幾個月的還款。留越多越安全，但能投入市場的本金就越少。")
     default_rate, default_years, default_grace = LOAN_DEFAULTS[loan_type]
     loan_rate = ui.slider("rate", "貸款年利率 (%)", 1.5, 8.0, default_rate, step=0.1,
                           help="銀行每年跟你收的利息比率。這是這個策略最重要的「成本」——你的投資報酬必須跑贏它才划算。")
@@ -655,6 +728,31 @@ def show_results():
         st.plotly_chart(figure, width='stretch')
         record["figures"].append((heading, figure, note))
 
+    # ---- 信貸額度 ----
+    credit_rows = []                          # settings rows for the report, in the order the page shows them
+    credit_reminders = []
+    if loan_kind == "credit" and limits is None:
+        credit_rows.append(("信貸額度", credit.NOT_CHECKED))
+    elif limits is not None:
+        clamped = not estimated and entered_wan > limits.cap
+        if clamped:
+            st.warning("⚠️ " + credit.clamp_notice(limits, entered_wan))
+        st.caption(safe.markdown(credit.summary(limits)))
+        pay_at = grace_periods if grace_periods < len(schedule.payments) else -1
+        payment = float(schedule.payments[pay_at])
+        reminders = [credit.ratio_notice(credit.monthly_ratio(payment, limits.income), payment),
+                     credit.income_notice(limits),
+                     None if estimated or clamped else credit.above_estimate_notice(limits, entered_wan)]
+        credit_reminders = [text for text in reminders if text]
+        for text, show in zip(reminders, (st.warning, st.warning, st.info)):
+            if text:
+                show(safe.markdown(text))
+        credit_rows.append(("信貸額度", credit.summary(limits) + f"核貸倍數 {limits.multiple:g}（估計）。"
+                            f"貸款金額：{credit.LMODE_OPTIONS[lmode]}。"))
+        if clamped:
+            credit_rows.append(("本金調整", credit.clamp_notice(limits, entered_wan)))
+        credit_rows += [("提醒", text) for text in credit_reminders]
+
     # ---- 資料來源與品質 ----
     with page_part(part_failed("使用的資料"), broken):
         st.markdown("---")
@@ -854,7 +952,8 @@ def show_results():
     st.markdown("---")
     with page_part(part_failed("安全邊界"), broken):
         show_safety_limit(record, data, params, result.mc_ok,
-                          snapshot=(params, symbol_a, symbol_b, symbol_proxy, pay_day_option, repair_splits))
+                          snapshot=(params, symbol_a, symbol_b, symbol_proxy, pay_day_option, repair_splits, borrow_cap),
+                          cap=borrow_cap)
     st.markdown("---")
 
     with page_part(part_failed("圖表"), broken):
@@ -1019,8 +1118,9 @@ def show_results():
             settings_query = urlencode(ui.settings())
             order_text = " → ".join(strat_labels) if strat_labels else "（沒有任何來源）"
             report_settings = [
-                ("貸款", f"{int(loan_principal / 10000):,} 萬元｜{loan_type}｜年利率 {loan_rate:g}%｜{loan_years} 年"
+                ("貸款", f"{credit.wan_text(loan_wan)} 萬元｜{loan_type}｜年利率 {loan_rate:g}%｜{loan_years} 年"
                          + (f"｜寬限期 {grace_periods // 12} 年" if grace_periods else "｜無寬限期") + f"｜每月 {pay_day_option} 日扣款"),
+                *credit_rows,
                 ("第一標的", symbol_a + (f"（上市前以 {backfill['proxy']} 代替）" if backfill else "")),
                 ("配息", (f"再投入，其中 {reinvest_ratio_b * 100:.0f}% 買第二標的 {symbol_b}" if is_reinvest and symbol_b
                           else "再投入，全部買回第一標的" if is_reinvest else "不再投入，存下來繳貸款")),
@@ -1042,7 +1142,8 @@ def show_results():
                 share_url=f"{base_url}?{settings_query}" if base_url and settings_query else base_url,
                 settings=report_settings, data_notes=record["data_notes"], warnings=record["warnings"],
                 summaries=[(group, rows) for group, rows in record["summaries"].items() if rows],
-                tables=record["tables"], figures=record["figures"], disclaimer=DISCLAIMER, source_url=SOURCE_URL)
+                tables=record["tables"], figures=record["figures"], disclaimer=DISCLAIMER, source_url=SOURCE_URL,
+                closing_notes=[credit.CLOSING] if limits is not None else [])
             st.download_button("📄 把這次的結果存下來", data=report_html.encode("utf-8"),
                                file_name=f"stress_test_{symbol_a}_{taipei_now():%Y%m%d}.html",
                                mime="text/html", key="dl_report", type="primary")
