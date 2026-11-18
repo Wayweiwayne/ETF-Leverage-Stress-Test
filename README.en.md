@@ -21,7 +21,7 @@ It tracks two sides at once:
 - **Assets** — the market value of the stock or ETF, and the dividends it pays.
 - **Liabilities** — the monthly loan payment, the jump when an interest-only period ends, and rate rises.
 
-The first month in which the payment cannot be covered, the strategy is **ruined**. That state is absorbing: a later rally makes no difference.
+The first month in which the payment cannot be covered, the strategy is **ruined**.
 
 ## Features
 
@@ -31,6 +31,7 @@ The first month in which the payment cannot be covered, the strategy is **ruined
 - **Realistic loan model** — level amortisation, interest-only grace period with the payment jump afterwards, and a rate shock that recomputes the payment on the outstanding balance. A floating rate can follow a yearly schedule, with random moves on top in the Monte Carlo.
 - **Dividend model** — payouts rise and fall with the market (dividend beta), with a floor during crashes, paid monthly, quarterly, half-yearly or yearly.
 - **Taxes and fees** — transaction tax, the health-insurance levy on dividends, dividend income tax and a loan origination fee, defaulting to Taiwan's current rates.
+- **Safety margin** — works backwards: with everything else unchanged, the largest loan, or the smallest monthly top-up, that keeps the chance of default under a limit you pick (1%, 5% or 10%), plus a map of the default rate for loan size × monthly top-up.
 - **Repayment waterfall** — salary, dividend pool, cash buffer, selling the main asset and selling the second asset are drawn in the order you choose, and ruin is declared only when all are spent; any of them can be left out.
 - **Fire-sale discount** — forced selling in a crash month costs extra.
 - **Leveraged-ETF compounding and volatility decay** — months in which the second asset has no real data are modelled from the first with the standard leveraged-fund formula, without projecting any excess return it earned in the sample.
@@ -43,6 +44,8 @@ The first month in which the payment cannot be covered, the strategy is **ruined
 - Every input has a plain-language tooltip, and a separate page lists the formulas and model assumptions.
 
 ## Screens
+
+![Safety margin: the largest loan, the smallest monthly top-up, and the default-rate map of loan size × monthly top-up](docs/images/safety-limit.png)
 
 | Outcome for every historical entry month | Month-by-month ledger for one entry month |
 |---|---|
@@ -95,6 +98,7 @@ The app opens at `http://localhost:8501`.
 | `market_data.py` | Fetching with snapshot fallback, split repair and outlier checks, month alignment, pre-listing backfill. |
 | `main_page.py` | The main page: collects inputs, calls the engine, draws the charts. |
 | `ui_state.py` | Input defaults, bounds and URL synchronisation. |
+| `safety_limit.py` | The safety-margin section: search ranges, conclusions, the default-rate map and its report content. |
 | `report.py` | Builds the downloadable HTML report. |
 | `build_standalone.py` | Packs the whole app into one HTML file (`dist/`). |
 | `pages/1_Model_Details.py` | Formulas and model assumptions. |

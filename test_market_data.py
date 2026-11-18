@@ -991,5 +991,22 @@ class AlignmentTests(unittest.TestCase):
         self.assertFalse(align_months(monthly('2015-01-01', 12, 1, 'A'))['Synthetic_A'].any())
 
 
+
+class TaiwanTimeTests(unittest.TestCase):
+    def test_taiwan_time_needs_no_time_zone_database(self):
+        import zoneinfo
+        from datetime import timedelta
+
+        def missing(*args, **kwargs):
+            raise zoneinfo.ZoneInfoNotFoundError("No time zone found with key Asia/Taipei")
+
+        with patch("zoneinfo.ZoneInfo", side_effect=missing):
+            now = market_data.taipei_now()
+            today = market_data._today()
+        self.assertEqual(now.utcoffset(), timedelta(hours=8))
+        self.assertIsNone(today.tzinfo)
+        self.assertEqual(today, today.normalize())
+        self.assertEqual(today, now.tz_localize(None).normalize())
+
 if __name__ == '__main__':
     unittest.main()

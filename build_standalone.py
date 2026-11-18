@@ -12,12 +12,13 @@ the embedded snapshots.
 import json
 import os
 import sys
+import tomllib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT = os.path.join(HERE, "dist", "ETF-Leverage-Stress-Test.html")
 STLITE_VERSION = "1.12.0"
 APP_FILES = ["app.py", "main_page.py", "pages/1_Model_Details.py", "engine.py", "market_data.py",
-             "report.py", "ui_state.py", "version.py", "data/mirror_tickers.txt"]
+             "report.py", "safety_limit.py", "ui_state.py", "version.py", "data/mirror_tickers.txt"]
 # Pure-Python packages fetched from PyPI; numpy and pandas come with Pyodide itself.
 REQUIREMENTS = ["plotly==6.7.0"]
 
@@ -26,7 +27,7 @@ TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ETF 槓桿壓力測試 __VERSION__（單機版）</title>
+<title>借錢投資 ETF 壓力測試 __VERSION__（單機版）</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/browser@__STLITE__/build/stlite.css">
 <style>
   #boot { font-family: -apple-system, "Segoe UI", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
@@ -36,7 +37,7 @@ TEMPLATE = """<!doctype html>
 </head>
 <body>
 <div id="boot">
-  <h1>ETF 槓桿壓力測試 __VERSION__（單機版）</h1>
+  <h1>借錢投資 ETF 壓力測試 __VERSION__（單機版）</h1>
   <p>正在瀏覽器裡準備 Python 執行環境。第一次打開需要下載約 30 MB，視網路速度大約要半分鐘到幾分鐘；之後瀏覽器會記住，下次會快很多。</p>
   <p>計算全部在你的電腦上進行，不會把任何輸入送到伺服器。</p>
   <noscript><p>這個頁面需要開啟 JavaScript。</p></noscript>
@@ -49,7 +50,8 @@ const boot = document.getElementById("boot");
 new MutationObserver((_, observer) => {
   if (document.querySelector("#root [data-testid]")) { boot.remove(); observer.disconnect(); }
 }).observe(document.getElementById("root"), { childList: true, subtree: true });
-mount({ requirements: __REQUIREMENTS__, entrypoint: "app.py", files }, document.getElementById("root"));
+mount({ requirements: __REQUIREMENTS__, entrypoint: "app.py", files, streamlitConfig: __CONFIG__ },
+      document.getElementById("root"));
 </script>
 </body>
 </html>
@@ -68,6 +70,13 @@ def collect_files():
     return files
 
 
+def streamlit_config():
+    """The server's .streamlit/config.toml as the "section.option" pairs stlite takes in mount()."""
+    with open(os.path.join(HERE, ".streamlit", "config.toml"), "rb") as fh:
+        sections = tomllib.load(fh)
+    return {f"{section}.{name}": value for section, options in sections.items() for name, value in options.items()}
+
+
 def _script_json(value):
     """JSON that is safe inside a <script> element."""
     text = json.dumps(value, ensure_ascii=False, indent=None, separators=(",", ":"))
@@ -78,7 +87,8 @@ def build():
     sys.path.insert(0, HERE)
     from version import APP_VERSION
     return (TEMPLATE.replace("__VERSION__", APP_VERSION).replace("__STLITE__", STLITE_VERSION)
-            .replace("__REQUIREMENTS__", _script_json(REQUIREMENTS)).replace("__FILES__", _script_json(collect_files())))
+            .replace("__REQUIREMENTS__", _script_json(REQUIREMENTS)).replace("__CONFIG__", _script_json(streamlit_config()))
+            .replace("__FILES__", _script_json(collect_files())))
 
 
 def main(argv):
