@@ -21,7 +21,7 @@ It tracks two sides at once:
 - **Assets** — the market value of the stock or ETF, and the dividends it pays.
 - **Liabilities** — the monthly loan payment, the jump when an interest-only period ends, and rate rises.
 
-The first month in which the payment cannot be covered, the strategy is **ruined**. That state is absorbing: a later rally makes no difference.
+The first month in which the payment cannot be covered, the strategy is **ruined**.
 
 ## Features
 
