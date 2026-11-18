@@ -756,6 +756,11 @@ class AppTests(unittest.TestCase):
         at = self.with_defaults([25, 30, 36, 26, 30], years="10")
         self.check_year_chart(at, 10, [0, 0, 5, 0, 0, 0, 0, 0, 0, 0])
         self.assertIn("只有 5 次破產，發生在第 25、26、30（2 次）、36 個月。", self.texts(at.caption))
+        last_repeated = self.with_defaults([61, 84, 84])
+        self.assertIn("只有 3 次破產，發生在第 61、84（2 次）個月。", self.texts(last_repeated.caption))
+        spec, _ = self.year_chart(last_repeated)
+        self.assertEqual((spec["layout"]["height"], spec["layout"]["margin"]["t"], spec["layout"]["margin"]["b"]),
+                         (400, 30, 10))
 
     def test_many_defaults_keep_the_median_sentence_and_go_into_the_report(self):
         import report

@@ -169,7 +169,7 @@ def ruin_year_chart(ruin_months, total_months):
     fig.update_xaxes(type='category', title='貸款第幾年')
     fig.update_yaxes(title='破產的模擬次數', tickmode='linear', tick0=0, dtick=step, tickformat='d',
                      range=[0, (top + step) * 1.1], rangemode='tozero')
-    fig.update_layout(bargap=0.15, showlegend=False)
+    fig.update_layout(bargap=0.15, showlegend=False, height=400, margin=dict(t=30, b=10))
     return fig
 
 
@@ -922,7 +922,8 @@ def show_results():
                 if len(months) < 10:
                     seen = months.value_counts().sort_index()
                     listed = "、".join(f"{m}（{c} 次）" if c > 1 else str(m) for m, c in seen.items())
-                    below = (f"{n_paths:,} 次模擬裡只有 {len(months)} 次破產，發生在第 {listed} 個月。"
+                    gap = "" if listed.endswith("）") else " "   # no space after a full-width bracket
+                    below = (f"{n_paths:,} 次模擬裡只有 {len(months)} 次破產，發生在第 {listed}{gap}個月。"
                              "次數很少，這張圖只供參考。")
                 else:
                     below = (f"{len(months)} 次破產的模擬裡，有一半發生在第 {int(months.median())} 個月之前。"
