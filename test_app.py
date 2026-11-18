@@ -699,6 +699,78 @@ class AppTests(unittest.TestCase):
             at = self.start()
         self.assertEqual(self.errors(at), ["❌ 資料獲取異常：\n\n行情資料暫時無法處理。請稍後再試，或按側欄的「重新載入行情」。"])
 
+    # ---- 破產發生在第幾年（F6） ----
+
+    def with_defaults(self, months, **query):
+        """Run the page with the Monte Carlo paths defaulting exactly in `months` (1-based) and nowhere else."""
+        import engine
+        real = engine.run_summary
+
+        def rigged(df, params):
+            result = real(df, params)
+            mc = result.mc.copy()
+            mc["Is_Ruined"], mc["Ruin_Month"] = False, 0
+            mc.loc[:len(months) - 1, "Is_Ruined"] = True
+            mc.loc[:len(months) - 1, "Ruin_Month"] = months
+            result.mc = mc
+            return result
+
+        with patch("engine.run_summary", side_effect=rigged):
+            return self.start(seed="1", **query)
+
+    def year_chart(self, at):
+        import json
+        for node in at.get("plotly_chart"):
+            spec = json.loads(node.proto.spec)
+            bars = [t for t in spec["data"] if t.get("type") == "bar" and str(t["x"][0]).startswith("第1年")]
+            if bars:
+                return spec, bars[0]
+        self.fail("no chart of defaults by year")
+
+    def check_year_chart(self, at, years, expected):
+        spec, bar = self.year_chart(at)
+        self.assertEqual(bar["x"], [f"第{y}年" for y in range(1, years + 1)])
+        self.assertEqual(spec["layout"]["xaxis"]["type"], "category")
+        counts = bar["y"]["bdata"] if isinstance(bar["y"], dict) else bar["y"]
+        if isinstance(counts, str):
+            import base64
+            counts = list(np.frombuffer(base64.b64decode(counts), dtype=bar["y"]["dtype"]))
+        self.assertEqual([int(c) for c in counts], expected)
+        self.assertEqual(bar["text"], [str(c) if c else "" for c in expected])
+        yaxis = spec["layout"]["yaxis"]
+        self.assertEqual((yaxis["tickformat"], yaxis["tick0"]), ("d", 0))
+        self.assertEqual(yaxis["dtick"], int(yaxis["dtick"]))
+        self.assertGreaterEqual(yaxis["dtick"], 1)
+        self.assertEqual(yaxis["title"]["text"], "破產的模擬次數")
+
+    def test_a_single_default_still_gives_a_readable_chart(self):
+        at = self.with_defaults([77])
+        self.assertIn("##### 蒙地卡羅：破產多半發生在第幾年", [m.value for m in at.markdown])
+        self.check_year_chart(at, 7, [0, 0, 0, 0, 0, 0, 1])
+        captions = self.texts(at.caption)
+        self.assertIn("每根柱子代表貸款的一年；高度是 2,000 次模擬裡，在那一年繳不出貸款的次數。", captions)
+        self.assertIn("2,000 次模擬裡只有 1 次破產，發生在第 77 個月。次數很少，這張圖只供參考。", captions)
+        self.assertNotIn("有一半發生在第", captions)
+
+    def test_defaults_bunched_in_one_year(self):
+        at = self.with_defaults([25, 30, 36, 26, 30], years="10")
+        self.check_year_chart(at, 10, [0, 0, 5, 0, 0, 0, 0, 0, 0, 0])
+        self.assertIn("只有 5 次破產，發生在第 25、26、30（2 次）、36 個月。", self.texts(at.caption))
+
+    def test_many_defaults_keep_the_median_sentence_and_go_into_the_report(self):
+        import report
+        months = [1, 12, 13, 24, 37, 40, 40, 41, 84, 84, 60, 61]
+        with patch("report.build_report", wraps=report.build_report) as spy:
+            at = self.with_defaults(months)
+        self.check_year_chart(at, 7, [2, 2, 0, 4, 1, 1, 2])
+        captions = self.texts(at.caption)
+        self.assertIn("12 次破產的模擬裡，有一半發生在第 40 個月之前。", captions)
+        self.assertNotIn("次數很少", captions)
+        heading, figure, note = next(f for f in spy.call_args.kwargs["figures"] if f[0] == "蒙地卡羅：破產多半發生在第幾年")
+        self.assertEqual(list(figure.data[0].x), [f"第{y}年" for y in range(1, 8)])
+        self.assertIn("每根柱子代表貸款的一年", note)
+        self.assertIn("有一半發生在第 40 個月之前", note)
+
     def test_blank_second_ticker_reinvests_everything_in_the_first(self):
         at = self.start()
         self.ok(at.text_input(key="b").set_value("").run())

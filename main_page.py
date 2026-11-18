@@ -3,6 +3,7 @@ import re
 from contextlib import contextmanager
 from urllib.parse import urlencode
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -149,6 +150,27 @@ def page_part(failure, broken):
 
 def part_failed(name):
     return f"❌ 「{name}」這一段暫時無法顯示，其他結果不受影響。"
+
+
+def ruin_year_chart(ruin_months, total_months):
+    """Bar per loan year, the first to the last, with how many Monte Carlo paths defaulted in it.
+
+    `ruin_months` are 1-based months of default (months 1-12 are year 1). Years without a default
+    still get a bar of zero, so the axis always spans the whole loan.
+    """
+    years = -(-total_months // 12)
+    counts = np.bincount((np.asarray(ruin_months, dtype=int) - 1) // 12, minlength=years)[:years]
+    top = int(counts.max()) if len(counts) else 0
+    # Whole numbers only, a 1-2-5 step giving at most about five ticks.
+    step = next(n * 10 ** k for k in range(12) for n in (1, 2, 5) if n * 10 ** k * 5 >= top)
+    fig = go.Figure(go.Bar(x=[f"第{y}年" for y in range(1, years + 1)], y=counts, marker_color='#E74C3C',
+                           text=[str(c) if c else "" for c in counts], textposition='outside', cliponaxis=False,
+                           hovertemplate="%{x}：%{y} 次<extra></extra>"))
+    fig.update_xaxes(type='category', title='貸款第幾年')
+    fig.update_yaxes(title='破產的模擬次數', tickmode='linear', tick0=0, dtick=step, tickformat='d',
+                     range=[0, (top + step) * 1.1], rangemode='tozero')
+    fig.update_layout(bargap=0.15, showlegend=False)
+    return fig
 
 
 def reset_loan_defaults():
@@ -892,15 +914,21 @@ def show_results():
 
             ruined_paths = mc_res[mc_res['Is_Ruined']]
             if not ruined_paths.empty:
-                heading = "蒙地卡羅：破產發生在進場後第幾個月"
+                heading = "蒙地卡羅：破產多半發生在第幾年"
                 st.markdown(f"##### {heading}")
-                fig_ruin = px.histogram(ruined_paths, x='Ruin_Month', nbins=min(60, periods),
-                                        color_discrete_sequence=['#E74C3C'],
-                                        labels={'Ruin_Month': '進場後第幾個月'})
-                fig_ruin.update_layout(yaxis_title='破產的模擬次數', bargap=0.05)
-                show_chart(heading, fig_ruin)
-                st.caption(f"{len(ruined_paths)} 次破產的模擬裡，有一半發生在第 {int(ruined_paths['Ruin_Month'].median())} 個月之前。"
-                           "集中在哪一段，通常就是現金流最吃緊的時期（例如寬限期剛結束）。")
+                n_paths, months = len(mc_res), ruined_paths['Ruin_Month'].astype(int)
+                above = f"每根柱子代表貸款的一年；高度是 {n_paths:,} 次模擬裡，在那一年繳不出貸款的次數。"
+                st.caption(above)
+                if len(months) < 10:
+                    seen = months.value_counts().sort_index()
+                    listed = "、".join(f"{m}（{c} 次）" if c > 1 else str(m) for m, c in seen.items())
+                    below = (f"{n_paths:,} 次模擬裡只有 {len(months)} 次破產，發生在第 {listed} 個月。"
+                             "次數很少，這張圖只供參考。")
+                else:
+                    below = (f"{len(months)} 次破產的模擬裡，有一半發生在第 {int(months.median())} 個月之前。"
+                             "集中在哪一段，通常就是現金流最吃緊的時期（例如寬限期剛結束）。")
+                show_chart(heading, ruin_year_chart(months, periods), above + below)
+                st.caption(below)
 
     with page_part(part_failed("下載計算結果"), broken):
         export_hist = hist_res.rename(columns={

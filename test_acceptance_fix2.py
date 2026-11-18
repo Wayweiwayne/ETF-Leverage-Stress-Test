@@ -5,6 +5,7 @@ F4 「把這次的結果存下來」改成下載按鈕；F5 「一開始預留�
 全部離線（假行情）。
 """
 import glob
+import json
 import os
 import re
 import sys
@@ -216,3 +217,157 @@ class BufferPlacementTests(AppHarness, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------- F6：破產時間圖 ----------------
+
+RUIN_HEADING = "蒙地卡羅：破產多半發生在第幾年"
+OLD_RUIN_HEADING = "蒙地卡羅：破產發生在進場後第幾個月"
+
+
+@contextmanager
+def forced_ruins(months):
+    """讓主結果的蒙地卡羅剛好有這些破產月份（其他路徑都沒破產），方便測 1 次、少數、多次的情況。"""
+    import engine
+    real = engine.run_summary
+
+    def run_summary(df, params):
+        res = real(df, params)
+        mc = res.mc.copy()
+        mc["Is_Ruined"] = False
+        mc["Ruin_Month"] = 0
+        for path, month in enumerate(months):
+            mc.loc[mc.index[path], "Is_Ruined"] = True
+            mc.loc[mc.index[path], "Ruin_Month"] = month
+        res.mc = mc
+        return res
+
+    with patch("engine.run_summary", side_effect=run_summary):
+        yield
+
+
+def plotly_array(value):
+    """Plotly 6 的 JSON 會把數值陣列編成 {"dtype", "bdata"}；還原成 list。"""
+    if isinstance(value, dict) and "bdata" in value:
+        import base64
+        import numpy as np
+        array = np.frombuffer(base64.b64decode(value["bdata"]), dtype=np.dtype(value["dtype"]))
+        if "shape" in value:
+            array = array.reshape([int(n) for n in str(value["shape"]).split(",")])
+        return array.tolist()
+    return value
+
+
+def bar_counts(spec):
+    """熱圖以外的長條圖：{x 類別: (次數, 柱上文字)}，依 x 的順序。"""
+    counts = {}
+    for trace in spec["data"]:
+        if trace.get("type") != "bar":
+            continue
+        texts = plotly_array(trace.get("text"))
+        for i, (x, y) in enumerate(zip(plotly_array(trace["x"]), plotly_array(trace["y"]))):
+            text = texts[i] if isinstance(texts, list) else texts
+            counts[x] = (y, text)
+    return counts
+
+
+class RuinTimingChartTests(AppHarness, unittest.TestCase):
+    """F6：「蒙地卡羅：破產多半發生在第幾年」。"""
+
+    def chart(self, at):
+        """回傳 (圖表 spec, 圖上方的文字, 圖下方的第一個說明)。"""
+        nodes = walk(at.main, [])
+        heads = [i for i, n in enumerate(nodes) if getattr(n, "type", "") in ("markdown", "header", "subheader")
+                 and RUIN_HEADING in n.value]
+        self.assertEqual(len(heads), 1, "F6-1：小標題")
+        start = heads[0]
+        chart = next(i for i in range(start + 1, len(nodes)) if getattr(nodes[i], "type", "") == "plotly_chart")
+        above = [nodes[i].value for i in range(start + 1, chart) if getattr(nodes[i], "type", "") == "caption"]
+        below = next((nodes[i].value for i in range(chart + 1, len(nodes))
+                      if getattr(nodes[i], "type", "") == "caption"), "")
+        return json.loads(nodes[chart].proto.spec), above, below
+
+    def check_bars(self, spec, months, years):
+        counts = bar_counts(spec)
+        expected_x = [f"第{y}年" for y in range(1, years + 1)]
+        self.assertEqual(list(counts), expected_x, "F6-2：每一年都要有，依序第1年…第N年")
+        for year, label in enumerate(expected_x, start=1):
+            expected = sum(1 for m in months if (m - 1) // 12 + 1 == year)   # 第 1～12 個月算第 1 年
+            y, text = counts[label]
+            self.assertEqual(y, expected, label)
+            if expected:
+                self.assertEqual(str(text).replace(",", ""), str(expected), f"F6-3：{label} 柱上標出次數")
+            else:
+                self.assertIn(text, ("", None), f"F6-3：{label} 是 0，不標")
+        xaxis, yaxis = spec["layout"].get("xaxis", {}), spec["layout"].get("yaxis", {})
+        self.assertIn(xaxis.get("type", "category"), ("category",), "F6-2：X 軸是類別")
+        dtick, tickvals = yaxis.get("dtick"), plotly_array(yaxis.get("tickvals"))
+        integer_ticks = ((dtick is not None and float(dtick) >= 1 and float(dtick).is_integer()
+                          and float(yaxis.get("tick0", 0)).is_integer())
+                         or (tickvals and all(float(v).is_integer() for v in tickvals)))
+        self.assertTrue(integer_ticks, f"F6-3：Y 軸只有整數刻度（dtick={dtick}, tickvals={tickvals}）")
+
+    def test_single_ruin_like_the_users_case(self):
+        with forced_ruins([77]), Recorder() as rec:
+            at = self.start()
+        spec, above, below = self.chart(at)
+        self.check_bars(spec, [77], years=7)
+        self.assertNotIn(OLD_RUIN_HEADING, "\n".join(t for _, t in visible_texts(at)))
+        self.assertTrue(any("2,000" in t and re.search("柱子.*一年", t) for t in above),
+                        f"F6-4：圖上方說明（含模擬次數、每根柱子是一年）：{above}")
+        self.assertIn("只有 1 次破產", below, "F6-5")
+        self.assertRegex(below, r"第\s*77\s*個月")
+        self.assertIn("參考", below)
+        self.assertNotIn("有一半發生在", below)
+        self.check_report(rec, spec)
+
+    def test_a_few_ruins_list_their_months(self):
+        months = [5, 30, 30, 61, 84]
+        with forced_ruins(months):
+            at = self.start()
+        spec, _, below = self.chart(at)
+        self.check_bars(spec, months, years=7)
+        self.assertIn("只有 5 次破產", below)
+        for m in (5, 30, 61, 84):
+            self.assertRegex(below, rf"(第\s*)?{m}(\s*個月)?")
+        self.assertIn("參考", below)
+
+    def test_many_ruins_keep_the_median_sentence(self):
+        months = [3, 9, 14, 14, 20, 26, 33, 40, 47, 52, 58, 70]
+        with forced_ruins(months), Recorder() as rec:
+            at = self.start()
+        spec, above, below = self.chart(at)
+        self.check_bars(spec, months, years=7)
+        self.assertIn("12 次破產的模擬裡，有一半發生在第", below, "F6-5：10 次以上保留中位數那句")
+        self.assertNotIn("只有", below)
+        self.check_report(rec, spec)
+
+    def test_years_follow_the_loan_term(self):
+        with forced_ruins([1, 12, 13, 240]):
+            at = self.start(type="0")               # 理財型房貸預設 20 年
+        spec, _, _ = self.chart(at)
+        self.check_bars(spec, [1, 12, 13, 240], years=20)
+
+    def test_real_risky_run(self):
+        with Recorder() as rec:
+            at = self.start(salary="0", swan="1", swan_m="6", swan_d="40")
+        mc = rec.summaries[0][1].mc
+        months = [int(m) for m in mc.loc[mc["Is_Ruined"], "Ruin_Month"]]
+        self.assertGreaterEqual(len(months), 10, "測試前提")
+        spec, _, below = self.chart(at)
+        self.check_bars(spec, months, years=7)
+        self.assertRegex(below, rf"({len(months)}|{len(months):,}) 次破產的模擬裡，有一半發生在第")  # 保留原句
+
+    def test_no_chart_without_ruins(self):
+        with forced_ruins([]):
+            at = self.start()
+        self.assertNotIn(RUIN_HEADING, "\n".join(t for _, t in visible_texts(at)))
+
+    def check_report(self, rec, page_spec):
+        figures = {heading: (figure, note) for heading, figure, note in rec.last_report()["figures"]}
+        if RUIN_HEADING not in figures:
+            self.assertNotIn(OLD_RUIN_HEADING, figures)
+            return
+        figure, _ = figures[RUIN_HEADING]
+        report_spec = json.loads(figure.to_json())
+        self.assertEqual(bar_counts(report_spec), bar_counts(page_spec), "F6-6：報告裡的圖和畫面一致")
