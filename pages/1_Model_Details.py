@@ -1,13 +1,26 @@
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="計算方法說明", layout="wide")
+import details_en
+import i18n
+import ui_state as ui
+from i18n import t
 
-st.title("🧮 計算方法說明")
-st.caption("這一頁說明每個參數背後的公式與模型假設。看不懂沒關係——主頁面每個欄位旁的問號都有白話版本。")
+# This file holds the Chinese text of the page. The English text is in details_en.py, in the same order.
+st.set_page_config(page_title=t("計算方法說明"), layout="wide")
 
-st.page_link("main_page.py", label="← 回到壓力測試", icon="🏠")
+with st.sidebar:
+    ui.language_switch()
+
+st.title(t("🧮 計算方法說明"))
+st.caption(t("這一頁說明每個參數背後的公式與模型假設。看不懂沒關係——主頁面每個欄位旁的問號都有白話版本。"))
+
+st.page_link("main_page.py", label=t("← 回到壓力測試"), icon="🏠")
 st.markdown("---")
+
+if i18n.is_en():
+    details_en.render()
+    st.stop()
 
 # ------------------------------------------------------------------
 st.header("一、這個系統到底在算什麼？")

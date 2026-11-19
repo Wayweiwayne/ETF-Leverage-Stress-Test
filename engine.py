@@ -10,6 +10,8 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 import pandas as pd
 
+from i18n import err
+
 SALARY, DIVIDEND, BUFFER, SELL, SELL_B = "salary", "dividend", "buffer", "sell", "sell_b"
 # SELL liquidates the main asset, SELL_B the second one that reinvested dividends bought.
 SOURCES = (SALARY, DIVIDEND, BUFFER, SELL, SELL_B)
@@ -177,11 +179,11 @@ def parse_annual_returns(text):
     try:
         values = tuple(float(x.strip()) for x in str(text).split(",") if x.strip())
     except ValueError:
-        raise ValueError("年度報酬率必須是用逗號分開的數字，例如「5, 10, -20」。") from None
+        raise err("年度報酬率必須是用逗號分開的數字，例如「5, 10, -20」。") from None
     if not values:
-        raise ValueError("請至少輸入一個年度報酬率。")
+        raise err("請至少輸入一個年度報酬率。")
     if any((not np.isfinite(v)) or v <= -100 for v in values):
-        raise ValueError("年度報酬率必須大於 -100%。")
+        raise err("年度報酬率必須大於 -100%。")
     return values
 
 
@@ -190,9 +192,9 @@ def parse_rate_path(text):
     try:
         values = tuple(float(x.strip()) for x in str(text).split(",") if x.strip())
     except ValueError:
-        raise ValueError("每年利率變動必須是用逗號分開的數字，例如「0.25, 0.25, -0.125」。") from None
+        raise err("每年利率變動必須是用逗號分開的數字，例如「0.25, 0.25, -0.125」。") from None
     if any((not np.isfinite(v)) or abs(v) > 10 for v in values):
-        raise ValueError("每年利率變動必須介於 -10 與 10 個百分點之間。")
+        raise err("每年利率變動必須介於 -10 與 10 個百分點之間。")
     return values
 
 
@@ -249,9 +251,9 @@ def build_loan_schedule(principal, annual_rate_pct, total_months, grace_months=0
     the remaining term; the term itself does not change.
     """
     if total_months < 1:
-        raise ValueError("貸款期數至少需要 1 個月。")
+        raise err("貸款期數至少需要 1 個月。")
     if not 0 <= grace_months < total_months:
-        raise ValueError("寬限期必須短於貸款總年限。")
+        raise err("寬限期必須短於貸款總年限。")
     rates = annual_rate_path(annual_rate_pct, total_months, shock_year, shock_delta_pct, rate_path_pct)
     return schedule_from_rates(principal, rates, grace_months)
 
@@ -293,7 +295,7 @@ def _unique_order(order):
     seen, result = set(), []
     for src in order:
         if src not in SOURCES:
-            raise ValueError(f"未知的還款資金來源：{src}")
+            raise err("未知的還款資金來源：{src}", src=src)
         if src not in seen:
             seen.add(src)
             result.append(src)
@@ -322,7 +324,7 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     comparison contribution per path.
     """
     if dca_mode not in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT):
-        raise ValueError(f"未知的 DCA 對照模式：{dca_mode}")
+        raise err("未知的 DCA 對照模式：{dca_mode}", dca_mode=dca_mode)
     order = _unique_order(order)
     months, n_paths = ret_a.shape
 
@@ -576,9 +578,9 @@ def simulate_unemployment(ret_paths, full_salary, job_loss, rng):
 
 def validate_params(p):
     """Reject settings the simulation cannot give a meaningful answer for."""
-    def need(ok, message):
+    def need(ok, message, **params):
         if not ok:
-            raise ValueError(message)
+            raise err(message, **params)
 
     finite = np.isfinite
     need(finite(p.principal) and p.principal > 0, "貸款本金必須大於 0。")
@@ -597,8 +599,8 @@ def validate_params(p):
          "未來情境的年度報酬率必須大於 -100%。")
     need(1 <= p.mc_paths <= 100_000, "蒙地卡羅次數必須介於 1 與 100,000。")
     need(p.block_size >= 1, "區塊長度至少 1 個月。")
-    need(p.dca_mode in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT), f"未知的 DCA 對照模式：{p.dca_mode}")
-    need(p.mc_dividends in (MC_DIVIDENDS_HISTORY, MC_DIVIDENDS_MODEL), f"未知的蒙地卡羅配息來源：{p.mc_dividends}")
+    need(p.dca_mode in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT), "未知的 DCA 對照模式：{dca_mode}", dca_mode=p.dca_mode)
+    need(p.mc_dividends in (MC_DIVIDENDS_HISTORY, MC_DIVIDENDS_MODEL), "未知的蒙地卡羅配息來源：{mc_dividends}", mc_dividends=p.mc_dividends)
     need(all(finite(d) and abs(d) <= 10 for d in p.rate_path_pct), "每年利率變動必須介於 -10 與 10 個百分點之間。")
     need(finite(p.rate_volatility_pct) and 0 <= p.rate_volatility_pct <= 5, "利率隨機波動必須介於 0 與 5 個百分點。")
     need(0 <= p.sell_tax < 1 and p.fee + p.sell_tax < 1, "賣出的稅費合計必須低於 100%。")
@@ -609,12 +611,12 @@ def validate_params(p):
     need(p.dividend_interval_months in (0, 1, 3, 6, 12), "配息頻率必須是每 1、3、6 或 12 個月（或 0 代表依歷史判斷）。")
     _unique_order(p.source_order)
     job = p.job_loss
-    need(job.mode in (JOB_LOSS_NONE, JOB_LOSS_MANUAL, JOB_LOSS_RANDOM), f"未知的失業模型：{job.mode}")
+    need(job.mode in (JOB_LOSS_NONE, JOB_LOSS_MANUAL, JOB_LOSS_RANDOM), "未知的失業模型：{mode}", mode=job.mode)
     need(job.unemployed_salary >= 0, "失業期間的薪水支援不可為負。")
     if job.mode == JOB_LOSS_RANDOM:
         need(0 <= job.annual_prob <= 1, "年失業機率必須介於 0 與 1。")
         need(job.mean_duration > 0, "平均失業月數必須大於 0。")
-        need(job.distribution in ("lognormal", "poisson"), f"未知的失業時間分佈：{job.distribution}")
+        need(job.distribution in ("lognormal", "poisson"), "未知的失業時間分佈：{distribution}", distribution=job.distribution)
         need(0 <= job.crash_extra_low <= job.crash_extra_high <= 1, "崩盤時額外失業機率的範圍不正確。")
 
 
@@ -655,7 +657,7 @@ def monte_carlo_inputs(m, p, rng):
 
 def _future_monthly_returns(annual_returns, months):
     if len(annual_returns) == 0:
-        raise ValueError("請至少輸入一個年度報酬率。")
+        raise err("請至少輸入一個年度報酬率。")
     monthly = []
     for ar in annual_returns:
         monthly.extend([(1 + ar / 100.0) ** (1 / 12) - 1] * 12)
@@ -694,7 +696,7 @@ def modelled_second_asset_return(ret_a, noise, beta, decay, compounding):
 def _prepare_market(df, p):
     n = len(df)
     if n < 1:
-        raise ValueError("沒有可回測的月份。")
+        raise err("沒有可回測的月份。")
     ret_a = df["Price_Return_A"].to_numpy(dtype=float)
     div_a = df["Div_Yield_A"].to_numpy(dtype=float)
     close_a = df["Close_A"].to_numpy(dtype=float)
@@ -927,7 +929,7 @@ def run_trace(df, params, anchor_idx):
     p = params
     m, schedule, common, _ = _setup(df, p)
     if not 0 <= anchor_idx < m.n:
-        raise ValueError("進場月份超出資料範圍。")
+        raise err("進場月份超出資料範圍。")
     ret_a_hist, ret_b_hist, div_a_hist, _, _ = _history_paths(m, p)
     caps_hist, _ = _history_caps(ret_a_hist, p)
     col = slice(anchor_idx, anchor_idx + 1)
@@ -992,7 +994,7 @@ def _solve_seed(params):
 
 def _require_monte_carlo(df):
     if len(df) < 2:
-        raise ValueError("資料至少需要 2 個月才能跑蒙地卡羅模擬。")
+        raise err("資料至少需要 2 個月才能跑蒙地卡羅模擬。")
 
 
 def _mc_ruin_rate(df, p):
@@ -1016,19 +1018,19 @@ def solve_for(df, params, field, target_ruin, lo, hi, step):
     max(2, ceil(log2((hi - lo) / step)) + 3) simulations, and exactly one when lo == hi.
     """
     if field not in _SOLVE_FIELDS:
-        raise ValueError(f"求解項目必須是 principal（貸款本金）或 salary_cap（每月自掏上限），收到：{field!r}")
+        raise err("求解項目必須是 principal（貸款本金）或 salary_cap（每月自掏上限），收到：{field!r}", field=field)
     if not 0 < target_ruin < 1:
-        raise ValueError("目標破產率必須介於 0 與 1 之間（不含 0 與 1）。")
+        raise err("目標破產率必須介於 0 與 1 之間（不含 0 與 1）。")
     if not all(np.isfinite(v) for v in (lo, hi, step)):
-        raise ValueError("搜尋範圍與間距必須是有限的數字。")
+        raise err("搜尋範圍與間距必須是有限的數字。")
     if lo > hi:
-        raise ValueError("搜尋下限不可大於上限。")
+        raise err("搜尋下限不可大於上限。")
     if step <= 0:
-        raise ValueError("搜尋間距必須大於 0。")
+        raise err("搜尋間距必須大於 0。")
     if lo < 0:
-        raise ValueError("搜尋下限不可為負。")
+        raise err("搜尋下限不可為負。")
     if field == "principal" and lo == 0:
-        raise ValueError("貸款本金的搜尋下限必須大於 0。")
+        raise err("貸款本金的搜尋下限必須大於 0。")
     _require_monte_carlo(df)
 
     # Grid points lo + k*step up to hi; when hi is off the grid it is one extra point past the last.
@@ -1080,11 +1082,11 @@ def sensitivity_grid(df, params, principals, salary_caps, mc_paths=1000):
     """
     principals, salary_caps = list(principals), list(salary_caps)
     if not principals or not salary_caps:
-        raise ValueError("貸款本金與每月自掏上限都至少要有一個值。")
+        raise err("貸款本金與每月自掏上限都至少要有一個值。")
     if not all(np.isfinite(v) and v > 0 for v in principals):
-        raise ValueError("熱圖的貸款本金必須大於 0。")
+        raise err("熱圖的貸款本金必須大於 0。")
     if not all(np.isfinite(v) and v >= 0 for v in salary_caps):
-        raise ValueError("熱圖的每月自掏上限不可為負。")
+        raise err("熱圖的每月自掏上限不可為負。")
     _require_monte_carlo(df)
     base = replace(params, seed=_solve_seed(params), mc_paths=mc_paths)
     rates = [[_mc_ruin_rate(df, replace(base, principal=pr, salary_cap=cap)) for cap in salary_caps]

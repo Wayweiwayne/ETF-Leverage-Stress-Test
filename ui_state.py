@@ -10,6 +10,9 @@ between users.
 """
 import streamlit as st
 
+import i18n
+from i18n import t
+
 _STORE = "_settings"  # key -> serialised value, for every input that differs from its default
 
 
@@ -95,7 +98,7 @@ def slider(key, label, lo, hi, default, step=None, **kwargs):
     kind = _kind(lo, hi, default, step)
     if lo >= hi:
         # A slider needs at least two positions; with one there is nothing to choose.
-        st.caption(f"{label}：{_fmt(kind(lo))}（目前只有這個選項）")
+        st.caption(t("{label}：{v1}（目前只有這個選項）", label=label, v1=_fmt(kind(lo))))
         return kind(lo)
     default = _snap(default, lo, hi, step, kind)
     _seed(key, default, lambda raw: _snap(kind(float(raw)), lo, hi, step, kind))
@@ -157,6 +160,7 @@ def choice(key, label, options, default, universe=None, widget=None, by_value=Fa
     possibilities) so they stay valid if labels are reworded; `by_value` stores the text
     itself, for lists that depend on data.
     """
+    kwargs.setdefault("format_func", i18n.labeller())  # the stored values are Chinese texts; show them in the page language
     options = list(options)
     universe = list(universe) if universe is not None else options
     if default not in options:
@@ -178,4 +182,30 @@ def text(key, label, default, clean, **kwargs):
     _seed(key, default, clean)
     value = st.text_input(label, key=key, **kwargs)
     _remember(key, value, default)
+    return value
+
+
+def read_lang():
+    """The page language before any widget is drawn: the switch if it was used, else the settings, else the link."""
+    for raw in (st.session_state.get("lang"), st.session_state.get(_STORE, {}).get("lang"), st.query_params.get("lang")):
+        if raw in i18n.LANGS:
+            return raw
+    return i18n.DEFAULT
+
+
+def language_switch():
+    """The language switch at the top of the sidebar (E-01..E-06). Changing it is not a settings change."""
+    st.session_state["lang"] = read_lang()  # every run: a switch drawn on another page has its own widget state
+    value = st.segmented_control(t("語言"), list(i18n.LANGS), key="lang", required=True, label_visibility="collapsed",
+                                 format_func=i18n.LANG_NAMES.get)
+    value = i18n.valid(value)
+    if value != i18n.lang():
+        i18n.set_lang(value)  # normally app.py has read it already; this covers a page run without it
+    if _STORE in st.session_state:
+        _remember("lang", value, i18n.DEFAULT)
+    current = st.query_params.get("lang")      # the page may have no end() to publish the settings (the details page)
+    if value == i18n.DEFAULT and current is not None:
+        del st.query_params["lang"]
+    elif value != i18n.DEFAULT and current != value:
+        st.query_params["lang"] = value
     return value

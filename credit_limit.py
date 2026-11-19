@@ -5,6 +5,8 @@ All sentences live here so the page, the report and the tests read the same word
 """
 from dataclasses import dataclass
 
+from i18n import is_en, nt_big, t
+
 DBR_MULTIPLE = 22               # FSC rule: unsecured debt may not exceed 22 months of income
 DEFAULT_INCOME, DEFAULT_DEBT, DEFAULT_MULTIPLE, DEFAULT_PRODUCT_MAX = 5.0, 0.0, 20, 500
 MULTIPLE_RANGE = (10, 22)
@@ -49,13 +51,18 @@ SAFE_VALUE = "{cap} 萬（可借上限）"
 
 
 def wan_text(value):
-    """An amount in 萬 as `110`, `5.5` or `1,100` (one decimal at most, no trailing zero)."""
+    """An amount in 萬 as `110`, `5.5` or `1,100` (one decimal at most, no trailing zero).
+
+    In English the whole sum, as `NT$1.1 million` or `NT$500,000`: the sentences then have no unit of their own.
+    """
+    if is_en():
+        return nt_big(float(value) * 10_000)
     text = f"{round(float(value) + 0.0, 1):,.1f}".rstrip("0").rstrip(".")
     return "0" if text in ("", "-0") else text
 
 
 def wan(value):
-    return f"{wan_text(value)} 萬"
+    return wan_text(value) if is_en() else f"{wan_text(value)} 萬"
 
 
 @dataclass(frozen=True)
@@ -127,54 +134,50 @@ def monthly_ratio(payment, income):
 
 def summary(credit):
     """L-03."""
-    text = (f"依平均月收入 {wan_text(credit.income)} 萬：法規上限 {wan(credit.regulatory)}、"
-            f"一般可核貸約 {wan(credit.approvable)}（估計）、產品最高額度 {wan(credit.product_max)}。"
-            f"你的可借上限是 {wan(credit.cap)}。")
+    text = (t("依平均月收入 {v1} 萬：法規上限 {v2}、一般可核貸約 {v3}（估計）、產品最高額度 {v4}。你的可借上限是 {v5}。", v1=wan_text(credit.income), v2=wan(credit.regulatory), v3=wan(credit.approvable), v4=wan(credit.product_max), v5=wan(credit.cap)))
     if credit.debt > 0:
-        text += f"已扣掉既有無擔保債務 {wan(credit.debt)}。"
+        text += t("已扣掉既有無擔保債務 {v1}。", v1=wan(credit.debt))
     return text
 
 
 def clamp_notice(credit, entered):
     """L-01a / L-01b (without the warning sign): the input was held down to the cap."""
     if credit.capped_by_product:
-        return (f"你輸入 {wan(entered)}，但產品最高額度是 {wan(credit.product_max)}。"
-                f"以下結果以 {wan(credit.product_max)}計算。")
-    return (f"你輸入 {wan(entered)}，但依規定（平均月收入的 22 倍，扣掉既有無擔保債務）最多只能借 {wan(credit.cap)}。"
-            f"以下結果以 {wan(credit.cap)}計算。")
+        return (t("你輸入 {v1}，但產品最高額度是 {v2}。以下結果以 {v2}計算。", v1=wan(entered), v2=wan(credit.product_max)))
+    return (t("你輸入 {v1}，但依規定（平均月收入的 22 倍，扣掉既有無擔保債務）最多只能借 {v2}。以下結果以 {v2}計算。", v1=wan(entered), v2=wan(credit.cap)))
 
 
 def ratio_notice(ratio, payment):
     """L-05 / L-06 (without the warning sign), or None when the ratio is fine."""
     if ratio <= RATIO_HIGH:
         return None
-    head = f"寬限期後每月應繳 ${int(round(payment)):,}，是平均月收入的 {ratio * 100:.1f}%。"
-    tail = "這裡只算這筆新貸款，沒有算你其他貸款的月付。"
+    head = t("寬限期後每月應繳 ${v1:,}，是平均月收入的 {v2:.1f}%。", v1=int(round(payment)), v2=ratio * 100)
+    tail = t("這裡只算這筆新貸款，沒有算你其他貸款的月付。")
     if ratio > RATIO_DECLINE:
-        return head + "多數銀行可能婉拒。有銀行規定每月還款不能超過月收入的 70%。" + tail
-    return head + "月付比偏高。部分銀行的產品條件寫，每月還款不能超過月收入的三分之一。" + tail
+        return head + t("多數銀行可能婉拒。有銀行規定每月還款不能超過月收入的 70%。") + tail
+    return head + t("月付比偏高。部分銀行的產品條件寫，每月還款不能超過月收入的三分之一。") + tail
 
 
 def income_notice(credit):
     """L-07 (without the warning sign), or None when income is at least the threshold."""
     if credit.income * 12 >= MIN_YEARLY_INCOME:
         return None
-    return L07.format(yearly=wan_text(credit.income * 12))
+    return t(L07, yearly=wan_text(credit.income * 12))
 
 
 def above_estimate_notice(credit, principal):
     """L-10: the input is above the typical approval but still within the cap."""
     if credit.approvable < principal <= credit.cap:
-        return f"你輸入的 {wan(principal)}，高過一般可核貸的估計 {wan(credit.approvable)}。銀行可能只核給較低的額度。"
+        return t("你輸入的 {v1}，高過一般可核貸的估計 {v2}。銀行可能只核給較低的額度。", v1=wan(principal), v2=wan(credit.approvable))
     return None
 
 
 def exhausted_notice(credit):
     """L-08 when the cap is 0."""
-    return L08.format(d=wan_text(credit.debt), inc=wan_text(credit.income), gross=wan_text(credit.gross))
+    return t(L08, d=wan_text(credit.debt), inc=wan_text(credit.income), gross=wan_text(credit.gross))
 
 
 def switch_toast(type_name, principal, rate, years, grace_years):
     """L-16."""
-    grace = f"寬限期 {grace_years} 年" if grace_years else "無寬限期"
-    return f"已換成{type_name}的預設值：本金 {principal} 萬、年利率 {rate:g}%、{years} 年、{grace}。"
+    grace = t("寬限期 {grace_years} 年", grace_years=grace_years) if grace_years else t("無寬限期")
+    return t("已換成{type_name}的預設值：本金 {principal} 萬、年利率 {rate:g}%、{years} 年、{grace}。", type_name=type_name, principal=wan_text(principal), rate=rate, years=years, grace=grace)
