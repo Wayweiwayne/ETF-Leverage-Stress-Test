@@ -26,18 +26,18 @@ So it tracks two lines at the same time:
 If in any month you can't come up with the money for the loan payment (every source of money is used up and you are still short), the strategy counts as a **default**.
 """)
 
-    st.info("**In plain words**: this is not just a return calculation. It simulates whether someone who borrows to invest gets crushed by the monthly payments along the way.")
+    st.info("**In plain words**: this is not just a return calculation. It simulates whether someone who borrows to invest is overwhelmed by the monthly payments along the way.")
 
     # ------------------------------------------------------------------
     st.header("2. How much is the monthly loan payment? (the \"Loan\" section in the sidebar)")
 
     st.subheader("The usual case: equal payments of principal and interest")
     st.markdown(r"""
-Say you borrow principal $L$ at an annual rate $R$. The monthly rate is then $r = R / 12$.
+Say you borrow a loan amount $L$ at an annual rate $R$. The monthly rate is then $r = R / 12$.
 You repay over $N$ months in total. The fixed monthly payment (PMT) uses the standard mortgage formula:
 """)
     st.latex(r"PMT = L \times \frac{r(1+r)^{N}}{(1+r)^{N} - 1}")
-    st.markdown("This amount stays the same every month. Early payments are mostly interest, and the principal is paid down slowly later.")
+    st.markdown("This amount stays the same every month. Early payments are mostly interest, and the loan balance goes down slowly at first.")
 
     st.subheader("Interest-only period: only interest for the first years")
     st.markdown(r"""
@@ -45,7 +45,7 @@ If you use an interest-only period, you pay only the interest for the first $g$ 
 """)
     st.latex(r"PMT_{\text{interest-only}} = L \times r")
     st.markdown(r"""
-When the interest-only period ends (after month $g$), the remaining principal must be repaid in a shorter time $(N-g)$,
+When the interest-only period ends (after month $g$), the remaining loan balance must be repaid in a shorter time $(N-g)$,
 so the monthly payment **jumps suddenly**. This is why "Monthly payment at first" and "Monthly payment after interest-only period" on the main page often differ a lot. In real life, this jump easily catches people off guard.
 
 The interest-only period must be shorter than the loan term (5 years at most). Personal loans usually have no interest-only period, so it is off by default for them. You can switch it on yourself if you need it.
@@ -53,23 +53,23 @@ The interest-only period must be shorter than the loan term (5 years at most). P
 
     st.subheader("Rate hike (the \"Simulate a rate hike\" switch)")
     st.markdown(r"""
-When you turn on the rate hike, the tool raises the rate in the year you choose. It then recalculates the monthly payment from **the principal still left**, over **the remaining term**, at the new rate. The term stays the same, but the monthly payment gets higher.
+When you turn on the rate hike, the tool raises the rate in the year you choose. It then recalculates the monthly payment from **the remaining loan balance**, over **the remaining term**, at the new rate. The term stays the same, but the monthly payment gets higher.
 """)
 
     st.subheader("Variable rate (the \"Variable rate: the rate can change every year\" switch)")
     st.markdown(r"""
-Most home and personal loans have a variable rate. When you turn it on, you can set how much the rate changes each year from year 2 (in percentage points, positive or negative, and the changes add up). For example, "0.25, 0.25, 0.125":
+Most home-equity and personal loans have a variable rate. When you turn it on, you can set how much the rate changes each year from year 2 (in percentage points, positive or negative, and the changes add up). For example, "0.25, 0.25, 0.125":
 
 | Loan year | Year 1 | Year 2 | Year 3 | Year 4 onward |
 |---|---|---|---|---|
 | Compared with the contract rate | No change | +0.25 | +0.50 | +0.625 |
 
-Each time the rate changes, the monthly payment is recalculated with the same method as above: remaining principal, remaining months, new rate. The rate never goes below 0.
+Each time the rate changes, the monthly payment is recalculated with the same method as above: remaining balance, remaining months, new rate. The rate never goes below 0.
 
 **Monte Carlo can also add random rate changes.** Nobody knows future rates, so you can set a "yearly random change (standard deviation)" $\sigma$.
-At the start of each loan year, each simulated path draws one more change on top of your scheduled changes. The draw has an average of 0 and a standard deviation of $\sigma$, and the changes add up year after year.
-So each path has its own rate path and its own monthly payments. The longer the term, the further the rate can drift (after $k$ years the standard deviation is about $\sigma\sqrt{k}$).
-The historical backtest column is a fixed analysis. It uses only your scheduled path and adds no random changes.
+At the start of each loan year, each Monte Carlo trial draws one more change on top of your scheduled changes. The draw has an average of 0 and a standard deviation of $\sigma$, and the changes add up year after year.
+So each trial has its own rate path and its own monthly payments. The longer the term, the further the rate can drift (after $k$ years the standard deviation is about $\sigma\sqrt{k}$).
+The historical backtest column is a fixed analysis. It uses only your scheduled changes and adds no random changes.
 """)
 
     # ------------------------------------------------------------------
@@ -108,7 +108,7 @@ For example, with quarterly payments, one payment is made every three months (th
 - **Months with no dividend** must be covered by other sources, so cash flow is tighter;
 - **A single larger payment** is more likely to pass the NT\$20,000 threshold for the NHI supplementary premium (see "Taxes and fees" below).
 
-By default, the tool judges the frequency from how often this ETF actually paid over the last three years. This affects only dividends made by the model. In months with real data, the real payment dates and amounts are always used.
+By default, the tool judges the frequency from how often this ETF actually paid over the last three years. This affects only dividends from the model. In months with real data, the real payment dates and amounts are always used.
 """)
 
     # ------------------------------------------------------------------
@@ -118,7 +118,7 @@ Each month when the loan payment is due, the tool uses the sources below in the 
 
 1. **Saved dividends**: dividend cash that has built up and not been spent yet.
 2. **Cash buffer**: the spare cash you set aside at the start.
-3. **Sell main ETF**: sell the stock you bought with the loan for cash (this costs trading fees, and in a crash you may also take a fire-sale loss, see the next section).
+3. **Sell main ETF**: sell the ETF you bought with the loan for cash (this costs trading fees, and in a crash you may also take a fire-sale loss, see the next section).
 4. **Sell second ETF**: sell the second ETF you bought with dividends. This source exists only if you chose "Reinvest dividends" and entered a second ETF.
 5. **Salary (out of pocket)**: you pay from your own salary, up to a monthly limit.
 
@@ -144,7 +144,7 @@ When a month's fall is bigger than the threshold you set, the tool adds an extra
     st.markdown("The bigger the discount, the more shares you must sell to raise the same money, and the more it hurts your assets.\n\nThe trading fee is also charged once when you first buy shares with the loan.")
 
     # ------------------------------------------------------------------
-    st.header("6. What if the second ETF has no real data? (the \"Volatility decay of leveraged ETFs\" setting)")
+    st.header("6. What if the second ETF has no real data? (the \"Include leveraged-ETF volatility decay\" switch)")
     st.markdown(r"""
 The second ETF (for example a 2x ETF) has two kinds of months with no real returns: **before it was listed**, and the **assumed future** beyond the historical data.
 For these months the tool estimates it from the main ETF's moves. First it estimates the second ETF's sensitivity $\beta$ to the main ETF from the months where both have data
@@ -205,12 +205,12 @@ The tool uses two methods to judge risk, and shows the results side by side:
     # ------------------------------------------------------------------
     st.header("8. How is the comparison with DCA made?")
     st.markdown(r"""
-In every simulated path, the tool also runs a comparison group at the same time: **dollar-cost averaging (DCA)**:
+In every trial and every backtest start month, the tool also runs a comparison group at the same time: **dollar-cost averaging (DCA)**:
 
 - **Leveraged strategy**: borrow a large sum at the start and invest all of it, then carry the loan payments every month.
 - **DCA**: don't borrow at the start. Instead, each month, use "the money that would have gone to the loan payment from your salary" to buy shares directly.
 
-The only difference is that the leveraged strategy **holds the whole principal from the start**. So this comparison is really asking: "Putting in a lot at once versus buying slowly in steps: which is better?"
+The only difference is that the leveraged strategy **holds the whole loan amount from the start**. So this comparison is really asking: "Putting in a lot at once versus buying slowly in steps: which is better?"
 
 To make the comparison fair, **both sides must pay the same amount out of their own pockets**. Under "Advanced" in the sidebar you can choose how the comparison group invests:
 
@@ -218,7 +218,7 @@ To make the comparison fair, **both sides must pay the same amount out of their 
   If that month's loan payment was covered by dividends, the cash buffer or selling shares, that part is not your own money, so the DCA side invests nothing for it.
   After the leveraged strategy defaults, it stops paying, while the DCA side keeps investing the smaller of "the payment due" and "the salary limit" each month.
 - **Invest the full payment every month (old method)**: the DCA side invests the full payment due every month, whatever the salary limit is.
-  When the payment due is far above the salary limit (for example a monthly payment of NT\$67,000 and a salary limit of NT\$25,000), the DCA side invests much more principal than the leveraged side pays out of pocket,
+  When the payment due is far above the salary limit (for example a monthly payment of NT\$67,000 and a salary limit of NT\$25,000), the DCA side invests much more money than the leveraged side pays out of pocket,
   and the comparison is unfavorable to the leveraged strategy.
 """)
     st.warning("**A note on reading it**: in a market that rises over the long run, \"putting in a lot at the start\" usually wins, because the money compounds from an earlier date. So if you see the leveraged strategy beat DCA by a wide margin, remember that a large part of it is because the backtest period happened to be a bull market. It doesn't mean borrowing to invest always wins.")
@@ -238,7 +238,7 @@ The "Taxes and fees" section on the main page uses the current Taiwan rules by d
 
 A few simplifications:
 
-- **Income tax is deducted when the dividend is received.** In real life it is paid in May of the next year, so cash flow is a little on the cautious side. The 5% bracket actually gets a refund, which is counted as 0 here. The NT\$80,000 credit limit per household is not applied. The 40% bracket uses separate taxation at 28%.
+- **Income tax is deducted when the dividend is received.** In real life it is paid in May of the next year, so cash flow is a little on the cautious side. The 5% bracket actually gets a refund, which is counted as 0 here. The NT\$80,000 household cap on the credit is not applied. The 40% bracket uses separate taxation at 28%.
 - **By default, all dividends are treated as dividend income.** ETF payouts often include capital gains and income equalization, which have no income tax or supplementary premium. You can lower "Share of the dividend that counts as dividend income" for this.
 - **The supplementary premium threshold is checked for each payment.** A large position bought with a loan usually passes it on every payment. The DCA position builds up slowly, and early payments are below NT\$20,000, so they are not charged. This difference between the two approaches really exists in real life.
 - Dividends of the second ETF are not calculated (see section 6; leveraged ETFs usually pay none).
@@ -274,7 +274,7 @@ The safety limit answers two questions: with your other settings unchanged, what
 - **The search "halves the range"**: it first tries both ends of the search range, then keeps cutting the range in half. A dozen or so tries are enough, so it doesn't have to try every amount.
   The loan amount is tried from NT\$100,000 up to 10 times the current loan (at most NT\$100 million), in steps of NT\$100,000. The monthly out-of-pocket limit is tried from 0 to NT\$500,000 in steps of NT\$1,000.
   When there is a loan setup fee, the loan amount is tried from the first multiple of NT\$100,000 above the fee.
-- **Every try uses the same set of random futures**, so the more you borrow, the chance of default only stays the same or rises. It doesn't go up and down because of sampling luck.
+- **Every try uses the same set of random futures**, so the chance of default never falls as you borrow more. It doesn't go up and down because of sampling luck.
   This is also true when "Same random draws every run" is off: the tool always uses one fixed set of draws, so its numbers may differ slightly from the chance of default at the top of the main page.
 - **The default-risk map** changes the loan amount and the monthly out-of-pocket limit to 0.5 to 2 times the current values (when the monthly out-of-pocket limit is 0, it uses NT\$0 to NT\$50,000 instead) and lists the chance of default for every combination.
 - When "Salary (out of pocket)" is not in the repayment order, the monthly out-of-pocket amount doesn't change the result, so "least you must pay in each month" is not calculated.
@@ -284,7 +284,7 @@ The safety limit answers two questions: with your other settings unchanged, what
     # ------------------------------------------------------------------
     st.header("12. How much can a personal loan be? (the personal-loan fields in the \"Loan\" section of the sidebar)")
     st.markdown(r"""
-This section applies only to a "Personal loan". A home-equity loan is secured by your home and is not bound by these rules, and the sidebar doesn't show these fields for it.
+This section applies only to a "Personal loan" (an unsecured loan from a bank, with no collateral). A home-equity loan is secured by your home and is not bound by these rules, and the sidebar doesn't show these fields for it.
 
 **First, work out your average monthly income.** Average monthly income is your yearly income divided by 12. Yearly income includes the year-end bonus and profit share. For example, for a yearly income of NT\$720,000, the average monthly income is NT\$60,000.
 
@@ -322,7 +322,7 @@ Typical approval = average monthly income × approval multiple − existing unse
          ["NT$50,000 (existing unsecured debt NT$500,000)", "20", "NT$600,000", "NT$500,000", "NT$600,000"]],
         columns=["Average monthly income", "Approval multiple", "Legal limit", "Typical approval (estimate)", "Borrowing limit"]))
     st.markdown(r"""
-**What happens if the loan amount you enter is above the borrowing limit?** The tool calculates with the borrowing limit instead, and tells you at the top of the results. If you choose "Use the estimated approvable amount", the loan amount is the typical approval amount.
+**What happens if the loan amount you enter is above the borrowing limit?** The tool calculates with the borrowing limit instead, and tells you at the top of the results. If you choose "Use the typical approval (estimate)", the loan amount is the typical approval.
 
 **What happens if you enter 0 for average monthly income?** The tool doesn't check the limit, and the results are the same as when this feature didn't exist.
 
@@ -342,7 +342,7 @@ Typical approval = average monthly income × approval multiple − existing unse
 - The new rule from 2026-10-31: according to news reports. The original FSC press release was not obtained.
 """)
     st.warning("Bank conditions change often. What you can actually borrow is decided by the bank's own approval.")
-    st.caption("The credit limit is an estimate. Bank conditions change often. The bank's own approval is what counts.")
+    st.caption("The personal loan limit is an estimate. Bank conditions change often. The bank's own approval is what counts.")
 
     st.markdown("---")
     st.caption(t(DISCLAIMER))

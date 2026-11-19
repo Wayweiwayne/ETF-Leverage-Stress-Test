@@ -549,6 +549,8 @@ R-60：過期期間畫面上看到的**每一樣東西**都要是上一次計算
 
 ### 4.3 術語表
 
+> PM 2026-11-19：第 9 節（衝刺 4 英文校稿）的用字決定表併入本術語表，兩者衝突時以第 9 節為準。第 7.3 節 all_meet 句的英文改用 `out-of-pocket amount`。
+
 **介面與導覽**
 
 | # | 中文 | English |
@@ -1022,3 +1024,43 @@ R-60：過期期間畫面上看到的**每一樣東西**都要是上一次計算
 3. `lmode` = 1 的唯讀本金欄不要用 `ui.number`，否則會把算出來的值寫進 `loan` 和網址。
 4. 切換種類的 toast 要在 `on_change` 之後的重跑顯示一次（先存進 `st.session_state`，顯示後清掉）。
 5. 所有 L 句都用同一個格式函式，輸出 `110 萬`、`5.5 萬`、`1,100 萬`，QA 的驗收測試才比對得到。
+
+---
+
+## 9. 衝刺 4 英文校稿
+
+> UI/UX 在 PM 授權下直接修改 `i18n_en.py` 的英文值與 `details_en.py` 的英文文字（沒有動 key、`{佔位符}`、程式邏輯）。校對對象是 RD 新翻的 564 句與說明頁十二節。以下用字決定同時補進 4.3 術語表。
+
+### 9.1 統一的用字決定
+
+| 概念（中文） | 英文（全站只用這個） | 不用 | 說明 |
+|---|---|---|---|
+| 蒙地卡羅的一次抽樣／次數 | `trial`（`2,000 trials`） | `run`、`path`、`simulation`（當計數單位） | `run` 只留給「按一次開始計算」（`Run`、`Turned on for this run`、`Same random draws every run`）。`simulation` 只指方法或整個計算（`Monte Carlo simulation`、`Running the simulation…`）。`path` 只指一條時間序列（`rate path`、`return path`）。「可能的未來」仍寫 `possible futures`。 |
+| 破產 | `default`（動詞、名詞） | `ruin`、`bankruptcy` | 同 E-12，全站已無 `ruin`、`bankrupt`。 |
+| 貸款本金（借多少） | `loan amount` | `principal`、`loan principal` | `principal` 只用在「還本金」的概念（`interest-only: repay no principal`）。「剩餘本金」寫 `remaining loan balance`。 |
+| 一般信貸 | `personal loan`；說明頁第十二節第一次出現時加 `(an unsecured loan from a bank, with no collateral)` | `credit loan` | 選項文字仍照 4.3 #21。 |
+| 理財型房貸 | `home-equity loan`；泛稱兩種貸款寫 `home-equity and personal loans` | `home loan`、`mortgage`（單獨指理財型房貸時） | 照 4.3 #20。「房貸」（一般房貸）在不用抵押的說明裡才寫 `mortgage`。 |
+| 信貸額度（功能名稱） | `personal loan limit` | `credit limit`（容易被讀成信用卡額度） | 「額度檢查的細項」寫 `Limit check details`。 |
+| 可核貸金額（選項） | `typical approval (estimate)`；選項 `Use the typical approval (estimate)`、`Enter my own amount` | `approvable amount`、`Enter it myself` | 與「可借上限 `borrowing limit`」「法規上限 `legal limit`」「產品最高額度 `product maximum`」並列。 |
+| 假想未來的選擇 | `assumed future`（區段、名詞）；單一選項叫 `scenario` | `future scenario`（當區段名稱） | 報告設定表的列名改為 `Assumed future after the history ends`。 |
+| 未來平均股息欄位 | `Average future dividend per year`（三處引用同一寫法） | `Average dividend per year in the future` | 引用處（警告句、選項、說明）一併改。 |
+| 每月自掏的上限 | `out-of-pocket limit`；不寫 `top-up`、`salary limit`（對應「自掏上限」處） | `top-up` | 說明句保持 `pay out of pocket`。 |
+| 台灣的法規 | 第一次出現寫 `Taiwan's rule (22 times …)`／`FSC`；`DBR22` 保留並於說明頁第十二節解釋 | 無解釋的 `regulation` | 外國讀者不知道 22 倍規則的出處。 |
+| 路徑／序列 | `rate path`、`return path` | 把蒙地卡羅的一次抽樣叫 `path` | 見第一列。 |
+| 側欄標籤長度 | 標籤盡量 50 字元以內，細節放 help | 括號內長解釋 | 改短的：第一標的、配息再投入、固定亂數、失業期間每月上限、股利所得比例。 |
+
+### 9.2 改動的類別與數量
+
+| 類別 | i18n_en.py（句） | details_en.py（處） | 內容 |
+|---|---|---|---|
+| 蒙地卡羅計數單位（`runs`／`paths`／`simulations` → `trials`） | 27 | 4 | 標題、圖表提示、說明句、錯誤訊息、報告設定表 |
+| 貸款本金（`principal` → `loan amount`／`loan balance`） | 5 | 6 | 含說明頁第二、八節 |
+| 信貸額度與可核貸選項字樣（`credit limit`、`approvable amount`、`Enter it myself`） | 14 | 3 | 側欄、結果提示、說明頁第十二節 |
+| 欄位名稱縮短或統一（含引用處） | 11 | 1 | 第一標的、配息再投入、固定亂數、失業期間每月上限、股利所得比例、未來平均股息 |
+| 文句重寫（被動、指代不明、語意不符、補短說明） | 21 | 6 | 歷史回測說明、百分位數表、利率調整、22 倍規則、腰斬與數字不符、`這台主機` |
+| 合計 | 78 | 20 | 沒有改任何 key、佔位符或程式檔 |
+
+### 9.3 留給 PM 的事項
+
+- 英文的蒙地卡羅計數單位改成 `trial` 後，中文的「次」不變；若 PM 想在報告裡統一用 `simulations`，只要改 `i18n_en.py` 的這一類。
+- 報告與側欄的金額格式沿用 RD 的規則（4.2 E-15）。

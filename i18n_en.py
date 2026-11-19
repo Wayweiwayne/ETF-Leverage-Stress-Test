@@ -56,11 +56,11 @@ EN = {
     "2. 買什麼、配息怎麼用":
         "2. What you buy and what happens to dividends",
     "第一標的（借來的錢買這檔，如 0056.TW）":
-        "Main ETF (the one you buy with the loan, such as 0056.TW)",
+        "Main ETF (bought with the loan, such as 0056.TW)",
     "上市前的歷史用哪一檔代替 (選填)":
         "Stand-in ETF for history before listing (optional)",
     "配息拿去再買股票（不拿來繳貸款）":
-        "Reinvest dividends (don't use them for loan payments)",
+        "Reinvest dividends (not used for the loan)",
     "3. 每月還款的錢從哪來":
         "3. Where each monthly payment comes from",
     "設定每月繳貸款時，優先動用哪一筆錢。系統會從第一順位開始用，不夠才往下一個。每個來源只能排一次；不想動用的來源，把多出來的順位選成「（不使用）」即可。":
@@ -98,7 +98,7 @@ EN = {
     "##### ⚙️ 槓桿 ETF 的隱藏耗損":
         "##### ⚙️ Hidden cost of leveraged ETFs",
     "把槓桿 ETF 的「來回震盪虧損」算進去":
-        "Include the volatility decay of leveraged ETFs",
+        "Include leveraged-ETF volatility decay",
     "自動還原來源沒處理的股票分割":
         "Repair stock splits the source did not adjust",
     "定期定額對照組每月投入多少":
@@ -106,19 +106,19 @@ EN = {
     "蒙地卡羅的配息怎麼算":
         "How Monte Carlo treats dividends",
     "蒙地卡羅要模擬幾次":
-        "Monte Carlo simulations to run",
+        "Number of Monte Carlo trials",
     "模擬時每次抽幾個月一組 (月)":
         "Months drawn at a time in the simulation",
     "固定亂數（同樣設定得到同樣結果）":
-        "Same random draws every run (same settings, same results)",
+        "Same random draws every run",
     "6. 稅與費用":
         "6. Taxes and fees",
     "預設用台灣現行的費率。槓桿策略和定期定額對照組都適用同一套規則。":
-        "The standard Taiwan rates are used. The leveraged strategy and the DCA comparison follow the same rules.",
+        "Taiwan's current rates are the standard values. The leveraged strategy and the DCA comparison follow the same rules.",
     "扣二代健保補充保費 (2.11%)":
         "Deduct the NHI supplementary premium (2.11%)",
     "你的綜合所得稅級距（決定股利要繳多少稅）":
-        "Your income tax bracket (sets the tax on dividends)",
+        "Income tax bracket (sets the tax on dividends)",
     "貸款開辦費 (元)":
         "Loan setup fee (NT$)",
     "平常會優先使用一天半以內的存檔，不必每次都向行情來源重抓。按這個按鈕會略過存檔，直接向 Yahoo Finance 重新取得這幾檔標的最新的價格與配息，並立刻重新計算。":
@@ -128,7 +128,7 @@ EN = {
     "歷史回測":
         "Historical backtest",
     "蒙地卡羅模擬（{mc_paths:,} 次）":
-        "Monte Carlo simulation ({mc_paths:,} runs)",
+        "Monte Carlo simulation ({mc_paths:,} trials)",
     "📋 使用的資料：{index:%Y-%m} 至 {index1:%Y-%m}，共 {n_months} 個月":
         "📋 Data used: {index:%Y-%m} to {index1:%Y-%m}, {n_months} months",
     "貸款":
@@ -142,15 +142,15 @@ EN = {
     "#### 📜 歷史回測：如果當年進場":
         "#### 📜 Historical backtest: if you had started back then",
     "把歷史上每個月都當成進場點，之後照真實走勢走；真實資料不夠長的部分接上假想未來，得到「如果當時進場會怎樣」的結果。":
-        "Every month in the history is used as a start month, and the real prices play out from there. Where the real data is too short, the assumed future fills in. You see what would have happened if you had started then.",
+        "The tool treats every month in the history as a start month. From there, prices follow the real data. Where the real data ends early, the assumed future fills in. You see what would have happened if you had started then.",
     "#### 🎲 蒙地卡羅模擬：{mc_paths:,} 種可能的未來":
         "#### 🎲 Monte Carlo simulation: {mc_paths:,} possible futures",
     "配息跟著報酬一起從歷史重抽，是當時實際發的金額，平均一年約 {v1:.1f}%。":
-        "Dividends are drawn from history together with the returns. They are the amounts actually paid back then, about {v1:.1f}% a year on average.",
+        "Each trial draws dividends from history together with the returns. These are the amounts paid at that time, about {v1:.1f}% a year on average.",
     "配息照你設定的「未來平均股息」計算，平均一年約 {v1:.1f}%。":
-        "Dividends follow your \"average future dividend\" setting, about {v1:.1f}% a year on average.",
+        "Dividends follow your \"Average future dividend per year\" setting, about {v1:.1f}% a year on average.",
     "從整段歷史裡每次抽連續 {block_size} 個月，重新拼成 {mc_paths:,} 種可能的未來，和哪個月進場無關。{mc_dividend_note}**不套用側欄第 4 段的假想未來**，但升息、突發大崩盤、崩盤賤賣等設定仍然有效。":
-        "Each run draws {block_size} months in a row from the whole history and joins the pieces into {mc_paths:,} possible futures. The start month doesn't matter. {mc_dividend_note} **The assumed future in sidebar section 4 is not used**, but rate hikes, the sudden crash and the fire-sale loss still apply.",
+        "Each trial draws {block_size} months in a row from the whole history and joins the pieces into {mc_paths:,} possible futures. The start month doesn't matter. {mc_dividend_note} **The assumed future in sidebar section 4 is not used**, but rate hikes, the sudden crash and the fire-sale loss still apply.",
     "❌ 資料獲取異常：\n\n{loaded}":
         "❌ Couldn't get the data:\n\n{loaded}",
     "槓桿：九成的結果落在這裡":
@@ -164,7 +164,7 @@ EN = {
     "貸款第幾年":
         "Loan year",
     "破產的模擬次數":
-        "Simulations that defaulted",
+        "Trials that defaulted",
     "房貸通常利率低、可以借很多年，但需要拿房子抵押；信貸不用抵押品，但利率較高、年限較短。":
         "A home-equity loan usually has a lower rate and a longer term, but you must put up your home as collateral. A personal loan needs no collateral, but the rate is higher and the term is shorter.",
     "貸款本金 (萬)":
@@ -188,7 +188,7 @@ EN = {
     "利率調高多少 (+%)":
         "Rate increase (+%)",
     "多數房貸和信貸是浮動利率，會跟著央行升降息調整。打開後可以排定之後每年利率各調多少，也可以讓蒙地卡羅在這條路徑之外再加上隨機的升降息。每次利率變動，月付金都會依剩餘本金和剩餘期數重算。":
-        "Most home and personal loans have a variable rate that follows the central bank. When this is on, you can set how much the rate changes each year. You can also let Monte Carlo add random rate changes on top of this path. Each time the rate changes, the monthly payment is recalculated from the remaining balance and remaining months.",
+        "Most home-equity and personal loans have a variable rate that follows the central bank. When this is on, you can set how much the rate changes each year. You can also let Monte Carlo add random rate changes on top of those yearly changes. Each time the rate changes, the monthly payment is recalculated from the remaining balance and remaining months.",
     "第 2 年起，每年利率調整多少（百分點），用逗號分開":
         "Rate change each year from year 2 (percentage points), separated by commas",
     "蒙地卡羅：每年再隨機升降多少（標準差，百分點）":
@@ -210,7 +210,7 @@ EN = {
     "失業模型":
         "Job-loss model",
     "失業或降薪期間，每月最多自掏多少 (元)":
-        "Monthly out-of-pocket limit during job loss or pay cut (NT$)",
+        "Monthly limit during job loss or pay cut (NT$)",
     "買賣手續費與滑價 (%)":
         "Trading fee and slippage (%)",
     "市場大跌時，如果你急著賣股票換錢繳貸款，常常只能用更差的價格脫手（賣壓大、流動性差）。打開這個會把這種「賤賣損失」算進去，讓崩盤情境更真實。":
@@ -224,7 +224,7 @@ EN = {
     "在進場後第幾個月暴跌":
         "Drop happens in month",
     "未來平均一年發多少股息 (%)":
-        "Average dividend per year in the future (%)",
+        "Average future dividend per year (%)",
     "同樣一年發 6%，每個月發一點和每季發一大筆，對現金流的影響不一樣：沒發的月份只能靠其他來源繳貸款，而且單筆金額越大，越容易超過二代健保補充保費的門檻。「自動判斷」會看這檔標的最近三年實際多久配一次。這只影響用股息模型算出來的配息（假想未來那段），真實資料的月份照實際發放日。":
         "Paying 6% a year as a little each month or a big amount each quarter affects cash flow differently. In months with no dividend, other sources must pay the loan. Also, a bigger single payment is more likely to pass the threshold for the NHI supplementary premium. \"Same as history (automatic)\" looks at how often this ETF paid over the last three years. This only affects dividends made by the dividend model (the assumed-future part). Months with real data use the real payment dates.",
     "市場好的時候公司賺得多、發的股息通常也多；市場差時股息會縮水。這個拉桿設定股息跟市場連動的強弱：設 0 代表不管漲跌都固定發，設 1 代表跟市場連動很大。就算遇到崩盤，系統仍保證至少發出基本金額的 10%，不會完全歸零。":
@@ -240,7 +240,7 @@ EN = {
     "蒙地卡羅是把歷史上的月份重新排列組合。預設是抽到哪個月的漲跌，就一併用那個月實際發的配息，所以不配息的標的不會憑空多出配息，配息多寡也跟著這檔標的自己的紀錄走。如果你認為未來的配息水準會跟過去不同，可以改成照「假想未來情境」裡設定的股息率來算。不管選哪一個，歷史資料用完之後的「假想未來」都是照你設定的股息率。":
         "Monte Carlo shuffles and recombines the months of history. By default, when a month's price move is drawn, the dividend actually paid in that month comes with it. So an ETF that pays no dividends doesn't get any from nowhere, and the amount follows the ETF's own record. If you think future dividends will differ from the past, you can switch to the dividend rate in the \"Assumed future\" section. Either way, the \"assumed future\" after the history ends always uses your dividend rate.",
     "蒙地卡羅模擬會隨機產生很多種可能的未來來統計成敗機率。跑越多次結果越穩定，但計算時間也越久。":
-        "Monte Carlo creates many random possible futures to count how often the strategy succeeds or fails. More runs give steadier results but take longer.",
+        "Monte Carlo creates many random possible futures to count how often the strategy succeeds or fails. More trials give steadier results but take longer.",
     "模擬未來時，系統會從歷史中『一段一段』抽出來拼接，而不是單月亂抽，這樣才能保留漲跌的連續性（例如崩盤通常會連跌好幾個月）。這裡設定每段多長。":
         "To simulate the future, the tool draws \"pieces\" of history and joins them, instead of drawing single months. This keeps the way moves follow each other (for example, a crash usually means several falling months in a row). This sets how long each piece is.",
     "勾選時，同一組設定每次算出來的蒙地卡羅結果都一樣，所以你調整參數後看到的變化，確定是參數造成的，不是運氣。取消勾選則每次重算都重新抽樣，可以用來感受抽樣本身會讓數字跳動多少。":
@@ -250,9 +250,9 @@ EN = {
     "單次領到的股利達 2 萬元時，整筆要扣 2.11% 的補充保費。借錢買的部位大，每次配息很容易超過門檻；定期定額對照組的部位小，初期通常不會被扣。":
         "When a single dividend payment reaches NT$20,000, Taiwan's National Health Insurance (NHI) deducts a supplementary premium of 2.11% of the whole amount. A large leveraged position often passes this threshold on every payment. The small DCA position usually doesn't at first.",
     "股利要併入綜合所得稅，但有 8.5% 的可抵減稅額，所以實際多繳的大約是「級距 − 8.5%」：12% 級距約 3.5%、20% 約 11.5%、30% 約 21.5%；40% 級距改用 28% 分開計稅比較划算。5% 級距其實會退稅，這裡保守以 0 計。系統在每次領到配息時就先扣掉，不等到隔年報稅。每戶可抵減稅額上限 8 萬元沒有另外計算。":
-        "Dividends are added to your income tax, but there is an 8.5% tax credit. So the extra tax you pay is about \"bracket − 8.5%\": about 3.5% in the 12% bracket, 11.5% in 20%, 21.5% in 30%. For the 40% bracket, separate taxation at 28% is better. The 5% bracket actually gets a refund, so the tool uses 0 to be cautious. The tool deducts the tax each time a dividend is paid, not at tax time next year. The credit limit of NT$80,000 per household is not applied separately.",
+        "Dividends are added to your income tax, but there is an 8.5% tax credit. So the extra tax you pay is about \"bracket − 8.5%\": about 3.5% in the 12% bracket, 11.5% in 20%, 21.5% in 30%. For the 40% bracket, a separate 28% tax is better. The 5% bracket actually gets a refund, so the tool uses 0 to be cautious. The tool deducts the tax each time a dividend is paid, not at tax time next year. The tool does not apply the NT$80,000 household cap on the credit.",
     "配息裡有多少比例算股利所得 (%)":
-        "Share of the dividend that counts as dividend income (%)",
+        "Share of dividends taxed as income (%)",
     "銀行撥款時收的一次性費用（開辦費、帳管費等），會直接從借到的錢裡扣掉，能拿去投資的錢就少這一筆。":
         "A one-time fee the bank charges when it pays out the loan (setup fee, account fee and so on). It comes straight out of the money you borrow, so you have that much less to invest.",
     "｜已自動修正 {n_repairs} 項":
@@ -310,7 +310,7 @@ EN = {
     "定期定額：期滿資產中位數":
         "DCA: median final value",
     "📈 每條路徑的利率各自隨機升降：到最後一期，九成的路徑年利率落在 {mc_final_rate_p5:.2f}% 到 {mc_final_rate_p95:.2f}% 之間。":
-        "📈 Each path's rate moves up and down on its own. In the last period, 90% of paths have an annual rate between {mc_final_rate_p5:.2f}% and {mc_final_rate_p95:.2f}%.",
+        "📈 Each trial's rate moves up and down on its own. In the last period, 90% of trials have an annual rate between {mc_final_rate_p5:.2f}% and {mc_final_rate_p95:.2f}%.",
     "破產機率（繳不出貸款）":
         "Chance of default (missed a payment)",
     "想知道最多能借多少？看下方的[安全邊界](#{ANCHOR})。":
@@ -360,7 +360,7 @@ EN = {
     "貸款剩餘餘額":
         "Loan balance",
     "%{x}：%{y} 次<extra></extra>":
-        "%{x}: %{y} runs<extra></extra>",
+        "%{x}: %{y} trials<extra></extra>",
     "安全邊界":
         "Safety limit",
     "這次沒有計算":
@@ -370,7 +370,7 @@ EN = {
     "破產機率 ≤ {v1}":
         "chance of default ≤ {v1}",
     "寬限期內你只需要付利息、不用還本金，所以每月負擔比較輕。但寬限期一結束，每月要還的錢會明顯跳高。一般信貸通常沒有寬限期，所以選信貸時預設不勾。":
-        "During the interest-only period you pay only interest and no principal, so the monthly burden is lighter. But when it ends, the monthly payment jumps clearly. Personal loans usually have no interest-only period, so it is off by default for them.",
+        "During the interest-only period you pay only interest and repay no principal, so the monthly burden is lighter. But when it ends, the monthly payment jumps sharply. Personal loans usually have no interest-only period, so it is off by default for them.",
     "設定升息從第幾年發生。":
         "The year the rate hike happens.",
     "升息的幅度。例如原本 4%、這裡填 1，升息後就變 5%。升息後每月還款會自動重新計算、變得更高。":
@@ -378,7 +378,7 @@ EN = {
     "依序是第 2 年、第 3 年、第 4 年…開始時利率的變動，正數是升息、負數是降息，會一直累加。例如「0.25, 0.25, 0.125」代表第 2 年升 1 碼、第 3 年再升 1 碼、第 4 年再升半碼，之後維持不變。留空代表沒有排定的調整。":
         "The rate change at the start of year 2, year 3, year 4 and so on. A positive number is a hike, a negative number is a cut, and the changes add up. For example, \"0.25, 0.25, 0.125\" means +0.25 in year 2, another +0.25 in year 3, and another +0.125 in year 4. After that the rate stays the same. Leave it empty for no scheduled changes.",
     "現實中沒有人知道未來的利率。設成 0.25 的話，蒙地卡羅的每條路徑每年會在你排定的調整之外，再隨機多升或多降一些（大約三分之二的年份落在 ±0.25 個百分點以內），而且會逐年累積。設 0 就只照排定的路徑。歷史回測那一欄只用排定的路徑，不加隨機變動。":
-        "Nobody knows future rates. At 0.25, each Monte Carlo path adds a random extra rise or fall each year on top of your scheduled changes (about two thirds of years stay within ±0.25 percentage points), and the changes add up year after year. At 0, only your scheduled path is used. The historical backtest column uses only the scheduled path, with no random changes.",
+        "Nobody knows future rates. At 0.25, each Monte Carlo trial adds a random extra rise or fall each year on top of your scheduled changes (about two thirds of years stay within ±0.25 percentage points), and the changes add up year after year. At 0, only your scheduled changes are used. The historical backtest column uses only the scheduled changes, with no random changes.",
     "領到的股息，除了買回原本的標的，也可以分一部分去買另一檔（例如槓桿型 ETF）。這裡填那檔的代號。留空代表全部買回第一標的。":
         "Besides buying more of the main ETF, you can use part of the dividends to buy another ETF (for example a leveraged ETF). Enter its ticker here. Leave it empty to put all dividends back into the main ETF.",
     "實際動用順序：":
@@ -388,7 +388,7 @@ EN = {
     "ℹ️ 你選了「配息拿去再買股票」，配息一領到就買股票，所以「存下來的配息」不會有錢，這個順位實際上不會出到力。":
         "ℹ️ You chose \"Reinvest dividends\". Dividends buy shares as soon as they arrive, so \"Saved dividends\" never has any money and this choice never pays anything.",
     "「手動」=自己指定第幾個月失業、持續多久（確定性壓力測試）。「隨機」=設定失業率，每條模擬路徑各自擲骰決定何時失業、多久找到工作（更貼近現實的機率分佈）。":
-        "\"Manual\" = you choose in which month the job loss starts and how long it lasts (a fixed stress test). \"Random\" = you set a job-loss rate, and each simulated path rolls dice for when a job loss happens and how long it lasts (a more realistic spread).",
+        "\"Manual\" = you choose in which month the job loss starts and how long it lasts (a fixed stress test). \"Random\" = you set a job-loss rate, and each trial rolls dice for when a job loss happens and how long it lasts (a more realistic spread).",
     "完全失業就填 0；部分降薪則填這段期間每月還能從薪水拿出來的最高金額。兩種模型都套用這個金額。":
         "Enter 0 for a full job loss. For a pay cut, enter the most you can still pay from salary each month during that time. Both models use this amount.",
     "從第幾個月開始失業/降薪":
@@ -412,29 +412,29 @@ EN = {
     "自己設計未來每一年的漲跌。例如「5, 10, -20」代表第一年漲5%、第二年漲10%、第三年跌20%。":
         "Design each future year's gain or loss. For example, \"5, 10, -20\" means +5% in the first year, +10% in the second, and -20% in the third.",
     "設定暴跌發生在進場後的第幾個月。選在剛開始、緩衝還很薄的時候，通常最致命。":
-        "The month after the start in which the drop happens. The worst time is right at the start, when the buffer is thin.",
+        "The month, counted from the start, when the drop happens. The worst time is right at the start, when the buffer is thin.",
     "這個月跌多少 (%)":
         "How much it drops this month (%)",
     "預估這檔標的未來平均一年配發的股息比率。例如填 6，就是一年大約領回本金的 6%。這個數字用在歷史資料用完之後的「假想未來」；有真實資料的月份一律用實際發過的配息。蒙地卡羅預設也用實際發過的配息，可以在「進階設定」改成用這裡的數字。":
-        "The expected average dividend this ETF pays per year. For example, enter 6 to get back about 6% of the amount invested each year. This is used for the \"assumed future\" after the history ends. Months with real data always use the dividends actually paid. By default, Monte Carlo also uses the dividends actually paid. You can switch it to this number under \"Advanced\".",
+        "The average dividend you expect this ETF to pay each year. For example, enter 6 to get back about 6% of the amount invested each year. This is used for the \"assumed future\" after the history ends. Months with real data always use the dividends actually paid. By default, Monte Carlo also uses the dividends actually paid. You can switch it to this number under \"Advanced\".",
     "賣股票時政府收的稅，買進不用。ETF 是 0.1%，個股是 0.3%。這筆是在上面「買賣手續費」之外另外算的。":
         "The tax the government charges when you sell. Buying has none. It is 0.1% for ETFs and 0.3% for single stocks. It is charged in addition to the trading fee above.",
     "ETF 的配息常常不全是股利，還包含資本利得和收益平準金，那些部分不用繳所得稅和補充保費。各檔 ETF 每次配息的組成不同，可以在投信公告的收益分配通知查到。不確定的話維持 100，等於全部都課，最保守。":
         "ETF payouts are often not all dividends. They can include capital gains and income equalization, and those parts have no income tax or supplementary premium. Each ETF's payout is made up differently, and you can find it in the fund company's distribution notice. If you're not sure, keep 100. That taxes the whole amount, which is the most cautious.",
     "信貸額度":
-        "Credit limit",
+        "Personal loan limit",
     "使用的資料":
         "Data used",
     "進場當月以該月價格買進，下個月開始繳第一期。處理方式的說明見「計算方法說明」第十節。":
         "The start month's price is the buying price, and the first payment is due the next month. See section 10 of \"How it works\" for how the data is handled.",
     "📎 用股息模型算的配息（歷史資料用完之後的假想未來{v1}）：{INTERVAL_NAMES}發一次{v2}。":
-        "📎 Dividends made by the dividend model (the assumed future after the history ends{v1}): paid {INTERVAL_NAMES}{v2}.",
+        "📎 Dividends from the dividend model (the assumed future after the history ends{v1}): paid {INTERVAL_NAMES}{v2}.",
     "⚠️ {symbol_a} 與替身 {backfill} 在重疊的 {backfill1} 個月裡，月報酬相關係數只有 {backfill2:.2f}，兩者走勢差異不小，替身可能不適合，建議換一檔性質更接近的。":
         "⚠️ In the {backfill1} months where {symbol_a} and the stand-in {backfill} overlap, the correlation of their monthly returns is only {backfill2:.2f}. They move quite differently, so the stand-in may not be suitable. Consider an ETF that is more similar.",
     "⚠️ 替身 {symbol_proxy} 的資料無法使用，改為只用 {symbol_a} 自己的歷史。原因：{loaded}":
         "⚠️ Couldn't use the stand-in {symbol_proxy}. Only the history of {symbol_a} is used. Reason: {loaded}",
     "⚠️ {symbol_a} 的歷史資料裡沒有任何配息，但「未來平均一年發多少股息」設為 {v1:.1f}%。{uses_assumed_yield}，配息是照這個數字算的，等於憑空多出一筆現金；如果它真的不配息，請把這個拉桿調到 0。":
-        "⚠️ {symbol_a}'s history has no dividends at all, but \"Average dividend per year in the future\" is set to {v1:.1f}%. For {uses_assumed_yield}, dividends are calculated from this number, which adds cash out of nowhere. If it really pays no dividends, set this slider to 0.",
+        "⚠️ {symbol_a}'s history has no dividends at all, but \"Average future dividend per year\" is set to {v1:.1f}%. For {uses_assumed_yield}, dividends are calculated from this number, which adds cash out of nowhere. If it really pays no dividends, set this slider to 0.",
     "📅 最早可以從 {index:%Y-%m} 進場：{symbol_a} 的第一筆價格在 {attrs}{listed_txt}，在那之前的 {backfill} 個月，用替身 {backfill1} 當時的實際漲跌與配息補上。":
         "📅 You can start as early as {index:%Y-%m}: the first price of {symbol_a} is on {attrs}{listed_txt}. For the {backfill} months before that, the stand-in {backfill1}'s actual price moves and dividends fill the gap.",
     "📅 最早只能從 {index:%Y-%m} 進場：{symbol_a} 的第一筆價格在 {attrs}{listed_txt}，在那之前沒有資料。想測更早的行情（例如 2008 年），可以在側欄「上市前的歷史用哪一檔代替」指定一檔上市更久的 ETF，用它的舊資料補上。":
@@ -446,7 +446,7 @@ EN = {
     "；崩盤（單月跌超過 {v1:.0f}%）時年失業機率再加 {v2:g}～{v3:g}%":
         "; in a crash (a month falling more than {v1:.0f}%), the yearly job-loss chance rises by another {v2:g} to {v3:g}%",
     "隨機失業（年失業機率 {v1:.1f}%，平均失業 {jl_mean_dur:g} 個月，{dist_name}，每月最多自掏 ${v2:,}{crash_txt}｜蒙地卡羅中 {v3:.1f}% 的路徑失業過，平均失業 {job_loss_avg_months:.1f} 個月）":
-        "Random job loss (yearly chance {v1:.1f}%, average {jl_mean_dur:g} months out of work, {dist_name}, monthly out-of-pocket limit NT${v2:,}{crash_txt} | in Monte Carlo, {v3:.1f}% of paths had a job loss, average {job_loss_avg_months:.1f} months)",
+        "Random job loss (yearly chance {v1:.1f}%, average {jl_mean_dur:g} months out of work, {dist_name}, monthly out-of-pocket limit NT${v2:,}{crash_txt} | in Monte Carlo, {v3:.1f}% of trials had a job loss, average {job_loss_avg_months:.1f} months)",
     "失業或降薪（第 {job_loss_start} 個月起 {job_loss_duration} 個月，每月最多自掏 ${v1:,}）":
         "Job loss or pay cut (for {job_loss_duration} months from month {job_loss_start}, monthly out-of-pocket limit NT${v1:,})",
     "ℹ️ 這組設定下槓桿策略完全沒有動用薪水，所以對照組沒有任何投入、期滿為 0；此時「贏過定期定額的機率」就等於「沒有破產的比例」。":
@@ -464,7 +464,7 @@ EN = {
     "**👉 大約每 {v1} 種可能的未來，就有 1 種會在中途繳不出貸款。**":
         "**👉 About 1 in every {v1} possible futures ends in a missed loan payment along the way.**",
     "抽樣誤差約 ±{v1:.1f} 個百分點（95% 信賴區間，{v2} 次模擬）。":
-        "Sampling error is about ±{v1:.1f} percentage points (95% confidence interval, {v2} simulations).",
+        "Sampling error is about ±{v1:.1f} percentage points (95% confidence interval, {v2} trials).",
     "**👉 {v1} 種模擬的未來裡，沒有任何一種繳不出貸款。**":
         "**👉 In {v1} simulated futures, none of them missed a loan payment.**",
     "這只代表用歷史上出現過的行情重組時沒有發生，不代表不可能；真實的破產機率有 95% 的把握低於 {v1:.2f}%。":
@@ -496,15 +496,15 @@ EN = {
     "最好的 5%":
         "Best 5%",
     "每一列是「有這麼多比例的模擬結果比這個數字差」。例如「最差的 5%」那列，代表 20 次裡有 1 次會落在這個金額以下。":
-        "Each row shows the value that this share of the simulated results falls below. For example, in the \"Worst 5%\" row, 1 run in 20 ends at or below this amount.",
+        "Each row shows a cutoff value. That share of the simulated results ends below it. For example, in the \"Worst 5%\" row, 1 trial in 20 ends at or below this amount.",
     "年化報酬率是把「每個月從薪水掏出的錢」和「期滿時手上的錢」換算成等值的每年報酬，方便和定存或其他投資比較。破產的路徑算 -100%；整段期間完全沒有自掏的路徑無法計算，不列入。":
-        "Annualized return converts \"the money you pay from salary each month\" and \"the money you hold at the end\" into an equal yearly return, so you can compare it with a savings account or other investments. A path that defaulted counts as -100%. A path with no out-of-pocket payment at all can't be calculated and is left out.",
+        "Annualized return converts \"the money you pay from salary each month\" and \"the money you hold at the end\" into an equal yearly return, so you can compare it with a savings account or other investments. A trial that defaulted counts as -100%. A trial with no out-of-pocket payment at all can't be calculated and is left out.",
     "色帶是槓桿策略手上資產的總值（還沒扣掉貸款），破產的路徑以 0 計。":
-        "The bands show the total value of the leveraged strategy's holdings (before subtracting the loan). Paths that defaulted count as 0.",
+        "The bands show the total value of the leveraged strategy's holdings (before subtracting the loan). Trials that defaulted count as 0.",
     "蒙地卡羅：破產多半發生在第幾年":
-        "Monte Carlo: in which year defaults mostly happen",
+        "Monte Carlo: in which loan year defaults happen",
     "每根柱子代表貸款的一年；高度是 {n_paths:,} 次模擬裡，在那一年繳不出貸款的次數。":
-        "Each bar is one year of the loan. Its height is the number of the {n_paths:,} simulations that missed a loan payment in that year.",
+        "Each bar is one year of the loan. Its height is the number of the {n_paths:,} trials that missed a loan payment in that year.",
     "下載計算結果":
         "Download results",
     "逐月明細":
@@ -540,7 +540,7 @@ EN = {
     "不會動用：":
         "Not used: ",
     "設定薪水驟降從進場後的第幾個月發生。":
-        "The month after the start in which pay drops sharply.",
+        "The month, counted from the start, when pay drops sharply.",
     "失業或降薪要持續幾個月。這段時間結束後，薪水自動恢復成上方設定的補貼上限。":
         "How many months the job loss or pay cut lasts. After that, your salary goes back to the out-of-pocket limit set above.",
     "年失業機率 (%)":
@@ -562,7 +562,7 @@ EN = {
     "自訂年度報酬率路徑：{exc}":
         "Custom yearly return path: {exc}",
     "暴跌的幅度。例如填 40，代表那個月股價直接腰斬式下殺 40%。":
-        "How big the drop is. For example, enter 40 and the price falls 40% in that one month, almost cutting it in half.",
+        "How big the drop is. For example, enter 40 and the price falls 40% in that one month.",
     "提醒":
         "Note",
     "（歷史替身）":
@@ -576,23 +576,23 @@ EN = {
     "📎 {symbol_a} 在 {backfill} 至 {backfill1} 這 {backfill2} 個月還沒有自己的資料，以 {backfill3} 當時的實際漲跌與配息代替。{corr_txt}":
         "📎 {symbol_a} has no data of its own for these {backfill2} months, {backfill} to {backfill1}. The actual price moves and dividends of {backfill3} at that time are used instead.{corr_txt}",
     "📎 {symbol_b} 在 {first_real:%Y-%m} 之前沒有資料，這 {modelled_b_months} 個月用「第一標的漲跌 × {beta_b:.2f} 倍」推估（倍數由兩者重疊期間估出；不假設它會持續贏過或輸給這個倍數）。":
-        "📎 {symbol_b} has no data before {first_real:%Y-%m}. For these {modelled_b_months} months, it is estimated as \"main ETF move × {beta_b:.2f}\" (the multiple is estimated from the overlap period. The tool does not assume it keeps beating or lagging this multiple).",
+        "📎 {symbol_b} has no data before {first_real:%Y-%m}. For these {modelled_b_months} months, it is estimated as \"main ETF move × {beta_b:.2f}\". The multiple comes from the overlap period. The tool does not assume it keeps beating or lagging this multiple.",
     "先前":
         "earlier",
     "⚠️ 「未來平均一年發多少股息」設為 {v1:.1f}%，但 {symbol_a} 最近 {v2} 個月實際平均約 {v3:.1f}%（全部歷史平均 {v4:.1f}%）。{uses_assumed_yield}，配息是照你設的數字算的，差距這麼大會直接影響結果，請確認這是你想測試的假設。":
-        "⚠️ \"Average dividend per year in the future\" is set to {v1:.1f}%, but {symbol_a} actually averaged about {v3:.1f}% over the last {v2} months (average over all its history: {v4:.1f}%). For {uses_assumed_yield}, dividends are calculated from your number. A gap this large directly affects the results, so check that this is the assumption you want to test.",
+        "⚠️ \"Average future dividend per year\" is set to {v1:.1f}%, but {symbol_a} actually averaged about {v3:.1f}% over the last {v2} months (average over all its history: {v4:.1f}%). For {uses_assumed_yield}, dividends are calculated from your number. A gap this large directly affects the results, so check that this is the assumption you want to test.",
     "、":
         ", ",
     "🟢 這次有開啟： ":
         "🟢 Turned on for this run: ",
     "色帶是槓桿策略手上資產的總值（還沒扣掉貸款），破產的路徑以 0 計。色帶下緣跌到貸款餘額線以下的月份，代表最差的 5% 情況裡資產已經不夠還清貸款；差距最大在第 {v1} 個月。":
-        "The bands show the total value of the leveraged strategy's holdings (before subtracting the loan). Paths that defaulted count as 0. In months where the lower edge of the band falls below the loan balance line, the assets in the worst 5% of cases can no longer repay the loan. The gap is largest in month {v1}.",
+        "The bands show the total value of the leveraged strategy's holdings (before subtracting the loan). Trials that defaulted count as 0. In months where the lower edge of the band falls below the loan balance line, the assets in the worst 5% of cases can no longer repay the loan. The gap is largest in month {v1}.",
     "色帶是槓桿策略手上資產的總值（還沒扣掉貸款），破產的路徑以 0 計。整段期間即使是最差的 5% 情況，資產都還高於貸款餘額。":
-        "The bands show the total value of the leveraged strategy's holdings (before subtracting the loan). Paths that defaulted count as 0. Even in the worst 5% of cases, the assets stay above the loan balance for the whole period.",
+        "The bands show the total value of the leveraged strategy's holdings (before subtracting the loan). Trials that defaulted count as 0. Even in the worst 5% of cases, the assets stay above the loan balance for the whole period.",
     "{n_paths:,} 次模擬裡只有 {v1} 次破產，發生在第 {listed}{gap}個月。次數很少，這張圖只供參考。":
-        "Only {v1} of {n_paths:,} simulations defaulted, in month {listed}.{gap}There are very few, so use this chart as a rough guide only.",
+        "Only {v1} of {n_paths:,} trials defaulted, in month {listed}.{gap}There are very few, so use this chart as a rough guide only.",
     "{v1} 次破產的模擬裡，有一半發生在第 {v2} 個月之前。集中在哪一段，通常就是現金流最吃緊的時期（例如寬限期剛結束）。":
-        "Of the {v1} simulations that defaulted, half did so before month {v2}. Where they cluster is usually when cash flow is tightest (for example, just after the interest-only period ends).",
+        "Of the {v1} trials that defaulted, half did so before month {v2}. Where they cluster is usually when cash flow is tightest (for example, just after the interest-only period ends).",
     "多數情況破產":
         "Mostly defaulted",
     "用到替身歷史":
@@ -628,7 +628,7 @@ EN = {
     "買賣手續費與滑價":
         "Trading fee and slippage",
     "歷史用完之後的未來情境":
-        "Future scenario after the history ends",
+        "Assumed future after the history ends",
     "未來的股息假設":
         "Future dividend assumption",
     "一年 {v1:g}%｜{INTERVAL_NAMES}發放｜跟市場連動程度 {div_beta:g}":
@@ -636,7 +636,7 @@ EN = {
     "蒙地卡羅模擬":
         "Monte Carlo simulation",
     "{mc_paths:,} 次｜每次抽 {block_size} 個月一組｜{v1}｜配息：{mc_div_label}":
-        "{mc_paths:,} runs | {block_size} months drawn at a time | {v1} | dividends: {mc_div_label}",
+        "{mc_paths:,} trials | {block_size} months drawn at a time | {v1} | dividends: {mc_div_label}",
     "定期定額對照組":
         "DCA comparison",
     "有開啟的情境與稅費":
@@ -650,21 +650,21 @@ EN = {
     "模擬計算中…":
         "Running the simulation…",
     "前幾年只繳利息不還本金。":
-        "Only interest is paid in the first years, with no principal.",
+        "In the first years you pay only interest and repay no principal.",
     "領到的股息，要分多少比例去買第二檔。例如填 50，就是一半買回原標的、一半買第二檔。":
         "The share of dividends used to buy the second ETF. For example, enter 50 to put half back into the main ETF and buy the second ETF with the other half.",
     "每一年內遭遇失業的機率。例如填 5，代表每年大約有 5% 機率失業。系統會換算成逐月機率，讓每條模擬路徑各自擲骰。":
-        "The chance of losing your job within a year. For example, enter 5 for about a 5% chance each year. The tool converts it to a monthly chance, and each simulated path rolls its own dice.",
+        "The chance of losing your job within a year. For example, enter 5 for about a 5% chance each year. The tool converts it to a monthly chance, and each trial rolls its own dice.",
     "對數常態的標準差。越大代表失業時間落差越懸殊（極短與極長都更常見）；越小代表大家找到工作的時間都接近平均值。":
         "The standard deviation of the log-normal distribution. A larger value makes job-loss lengths vary more (both very short and very long are more common). A smaller value keeps everyone's time to find work close to the average.",
     "市場單月跌幅超過多少 % 視為崩盤":
         "A one-month market drop of more than this (%) counts as a crash",
     "崩盤觸發時，年失業機率額外往上加的範圍。每條路徑會在這個區間內隨機抽一個值，模擬不同產業、不同景氣下裁員力道的差異。":
-        "The range of extra yearly job-loss chance added when a crash happens. Each path draws one value in this range at random, to simulate how layoffs differ across industries and economic conditions.",
+        "The range of extra yearly job-loss chance added when a crash happens. Each trial draws one value in this range at random, to simulate how layoffs differ across industries and economic conditions.",
     "核貸倍數 {multiple:g}（估計）。貸款金額：{LMODE_OPTIONS}。":
         " Approval multiple {multiple:g} (estimate). Loan amount: {LMODE_OPTIONS}.",
     "本金調整":
-        "Principal adjusted",
+        "Loan amount adjusted",
     "{symbol}{role}：來源價格期間 {attrs} 至 {attrs1}（非成立／上市日期）。":
         "{symbol}{role}: source price period {attrs} to {attrs1} (not the founding or listing date).",
     "📎 替身 {symbol_proxy} 的歷史沒有比 {symbol_a} 更早（或中間有缺口），所以沒有用到。":
@@ -826,7 +826,7 @@ EN = {
     "照歷史上實際發的配息（跟報酬一起重抽）":
         "Dividends actually paid in history (redrawn with the returns)",
     "照「未來平均一年發多少股息」的設定":
-        "The \"average dividend per year in the future\" setting",
+        "The \"Average future dividend per year\" setting",
     "與槓桿組相同的自掏金額 (公平比較)":
         "Same out-of-pocket amount as the leveraged side (fair comparison)",
     "每月投入整筆應繳金額 (舊版算法)":
@@ -834,7 +834,7 @@ EN = {
     "剛從 Yahoo Finance 取得":
         "Just fetched from Yahoo Finance",
     "這台主機先前取得的存檔":
-        "Saved copy from this computer",
+        "Saved copy from this server",
     "每日自動更新的存檔":
         "Saved copy, updated automatically every day",
     "較舊的存檔":
@@ -876,11 +876,11 @@ EN = {
 
     # ---- safety_limit.py ----
     "貸款本金 {y} 不比開辦費多，無法計算":
-        "A loan of {y} is not more than the setup fee, so it can't be calculated",
+        "A loan amount of {y} is no more than the setup fee, so it can't be calculated",
     "安全邊界（破產機率 ≤ {v1}）":
         "Safety limit (chance of default ≤ {v1})",
     "借 {v1} 萬時，破產機率約 {r}（{n:,} 次模擬）。":
-        "When you borrow {v1}, the chance of default is about {r} ({n:,} simulations).",
+        "When you borrow {v1}, the chance of default is about {r} ({n:,} trials).",
     "最多可以借":
         "Most you can borrow",
     "{v1} 萬":
@@ -888,7 +888,7 @@ EN = {
     "以目前其他設定，要讓破產機率在 {t} 以下，最多可以借 **{v1} 萬**（你目前設定 {v2} 萬）。":
         "With your other settings unchanged, the most you can borrow and keep the chance of default at or below {t} is **{v1}** (you entered {v2}).",
     "每月最多自掏 {v1} 時，破產機率約 {r}（{n:,} 次模擬）。":
-        "With a monthly out-of-pocket limit of {v1}, the chance of default is about {r} ({n:,} simulations).",
+        "With a monthly out-of-pocket limit of {v1}, the chance of default is about {r} ({n:,} trials).",
     "每月最少要自掏":
         "Least you must pay in each month",
     "以目前其他設定，要讓破產機率在 {t} 以下，每月最少要能自掏 **{v1}**（你目前設定 {v2}）。":
@@ -936,7 +936,7 @@ EN = {
     "借 {v1} 萬時的破產機率":
         "Chance of default when borrowing {v1}",
     "完全不自掏時的破產機率":
-        "Chance of default when paying nothing in",
+        "Chance of default with no out-of-pocket payments",
     "{v1}（目前 {v2}）":
         "{v1} (now {v2})",
     "每月自掏 {v1} 時的破產機率":
@@ -944,7 +944,7 @@ EN = {
     "光靠多掏錢救不回來，可以試著降低貸款本金再算一次。":
         "Paying in more can't fix this. Try a smaller loan and run it again.",
     "貸款本金 %{{y}}｜每月最多自掏 %{{x}}<br>破產機率 %{{customdata}}（{paths:,} 次模擬）<extra></extra>":
-        "Loan amount %{{y}} | monthly out-of-pocket limit %{{x}}<br>Chance of default %{{customdata}} ({paths:,} simulations)<extra></extra>",
+        "Loan amount %{{y}} | monthly out-of-pocket limit %{{x}}<br>Chance of default %{{customdata}} ({paths:,} trials)<extra></extra>",
     "只借 {v1} 萬時的破產機率":
         "Chance of default when borrowing just {v1}",
     "不計算（薪水沒有排進還款順位）":
@@ -996,11 +996,11 @@ EN = {
     "你沒有用薪水補貼還款。這時借多借少，每月還款和買進的資產都等比例變大或變小，破產機率幾乎不變，所以「最多可以借」不是「{hi} 萬以上」就是「不到 {lo} 萬」，不會落在中間。":
         "You don't use salary to help pay the loan. Then, borrowing more or less scales the monthly payment and the assets you buy by the same proportion, so the chance of default hardly changes. So \"Most you can borrow\" is either \"{hi} or more\" or \"under {lo}\", never in between.",
     "借越多，每月還款和買進的資產都會等比例變大，每月自掏那筆固定的錢就越不夠看，所以破產機率不會一直升高，而是慢慢接近「完全不自掏」時的水準；這個水準在 {t} 以下，所以整個搜尋範圍都達標。":
-        "The more you borrow, the larger the monthly payment and the assets you buy by the same proportion, and the fixed out-of-pocket amount counts for less. So the chance of default doesn't keep rising. It slowly approaches the level for \"paying nothing out of pocket\". That level is within {t}, so the whole search range meets the target.",
+        "The more you borrow, the more both your payments and your holdings grow, so your fixed monthly out-of-pocket amount matters less. The chance of default levels off near what it would be with nothing paid out of pocket. That level is within {t}, so the whole search range passes.",
     "這次的破產機率在 {t} 以下，所以整個搜尋範圍都達標。":
-        "This time the chance of default is within {t}, so the whole search range meets the target.",
+        "This time the chance of default is within {t}, so the whole search range passes.",
     "破產機率低不代表風險小：借越多，一旦出事賠得也越多。":
-        "A low chance of default doesn't mean low risk: the more you borrow, the more you lose if something goes wrong.",
+        "A low chance of default doesn't mean low risk: the more you borrow, the more you lose if things go wrong.",
     "這次的破產機率超過 {t}，調整本金沒有用；要從利率、年限、還款的順序或每月自掏的錢下手。":
         "This time the chance of default is above {t}, and changing the loan amount doesn't help. Look at the rate, the term, the order of repayment sources or the monthly out-of-pocket amount.",
     "問題可能不在借多少，而是利率、年限、每月自掏的錢或還款的順序；可以看看下面的地圖。":
@@ -1020,7 +1020,7 @@ EN = {
     "依平均月收入 {v1} 萬：法規上限 {v2}、一般可核貸約 {v3}（估計）、產品最高額度 {v4}。你的可借上限是 {v5}。":
         "With an average monthly income of {v1}: legal limit {v2}, typical approval about {v3} (estimate), product maximum {v4}. Your borrowing limit is {v5}.",
     "你輸入 {v1}，但依規定（平均月收入的 22 倍，扣掉既有無擔保債務）最多只能借 {v2}。以下結果以 {v2}計算。":
-        "You entered {v1}, but by regulation (22 times average monthly income, minus existing unsecured debt) you can borrow at most {v2}. The results below use {v2}.",
+        "You entered {v1}, but Taiwan's rule (22 times average monthly income, minus existing unsecured debt) lets you borrow at most {v2}. The results below use {v2}.",
     "寬限期後每月應繳 ${v1:,}，是平均月收入的 {v2:.1f}%。":
         "The monthly payment after the interest-only period is NT${v1:,}, which is {v2:.1f}% of average monthly income.",
     "這裡只算這筆新貸款，沒有算你其他貸款的月付。":
@@ -1038,35 +1038,35 @@ EN = {
     "無寬限期":
         "no interest-only period",
     "月付比偏高。部分銀行的產品條件寫，每月還款不能超過月收入的三分之一。":
-        "The payment-to-income ratio is high. Some banks' product terms say the monthly payment can't be more than one third of monthly income.",
+        "The payment-to-income ratio is high. Some banks' product terms say the monthly payment must not exceed one third of monthly income.",
     "多數銀行可能婉拒。有銀行規定每月還款不能超過月收入的 70%。":
-        "Most banks may decline. Some banks require that the monthly payment can't be more than 70% of monthly income.",
+        "Most banks may decline. Some banks cap the monthly payment at 70% of monthly income.",
     "自己輸入":
-        "Enter it myself",
+        "Enter my own amount",
     "用估計的可核貸金額":
-        "Use the estimated approvable amount",
+        "Use the typical approval (estimate)",
     "你每個月平均賺多少。算法：年收入（含年終獎金、分紅）÷ 12。例如年收入 72 萬，就填 6。填 0 代表不檢查信貸額度。":
-        "How much you earn on average each month. Calculation: yearly income (including year-end bonus and profit share) ÷ 12. For example, for a yearly income of NT$720,000, enter 6. Enter 0 to skip the credit-limit check.",
+        "How much you earn on average each month. Calculation: yearly income (including year-end bonus and profit share) ÷ 12. For example, for a yearly income of NT$720,000, enter 6. Enter 0 to skip the personal loan limit check.",
     "你現在欠的、沒有拿房子或車子抵押的錢，全部加起來。要算：信用卡未繳的錢和分期、循環利息、預借現金、現金卡、其他信貸、已經開始還的學貸。不用算：房貸、有抵押的車貸、股票質借、券商融資。":
-        "All the money you owe that is not secured by a house or car, added together. Count: unpaid credit-card balances and installments, revolving interest, cash advances, cash cards, other personal loans, and student loans you have started repaying. Don't count: mortgages, secured car loans, margin loans on stocks, broker margin financing.",
+        "All the money you owe that is not secured by a house or car, added together. Count: unpaid credit-card balances and installments, revolving interest, cash advances, cash cards, other personal loans, and student loans you have started repaying. Don't count: mortgages, secured car loans, loans secured by stocks, broker margin loans.",
     "銀行實際肯借你幾倍的月收入，沒有公開的數字，所以這是估計。依網路文章（不是銀行公布的），多在 15～18 倍，預設的 20 比較樂觀。想保守一點，可以調低。法規最高是 22 倍。":
         "How many times your monthly income a bank will actually lend is not published, so this is an estimate. According to online articles (not published by banks), it is mostly 15 to 18 times, so the standard 20 is optimistic. To be more cautious, lower it. The legal maximum is 22 times.",
     "一個信貸產品最多借多少。大型民營銀行常見 500 萬，公股銀行常見 300 萬。專業人士專案可到 1,000～1,200 萬。":
         "The most one personal-loan product lends. Large private banks commonly offer NT\\$5 million and state-owned banks NT\\$3 million. Professional-worker programs can reach NT\\$10 to 12 million.",
     "自己輸入：本金照你填的算。用估計的可核貸金額：本金直接用下面算出來的一般可核貸金額，不能自己改。":
-        "Enter it myself: the loan amount is what you enter. Use the estimated approvable amount: the loan amount is the typical approval calculated below, and you can't change it.",
+        "Enter my own amount: the loan amount is what you enter. Use the typical approval (estimate): the loan amount is the typical approval calculated below, and you can't change it.",
     "你打算借多少錢來投資。例如填 100 就是借 100 萬。":
         "How much you plan to borrow to invest. For example, enter 100 for NT$1 million.",
     "目前用的是估計的可核貸金額，要自己填請把上面改成「自己輸入」。":
-        "The estimated approvable amount is in use. To enter your own, change the setting above to \"Enter it myself\".",
+        "The typical approval estimate is in use. To enter your own amount, change the setting above to \"Enter my own amount\".",
     "額度檢查的細項（估計）":
-        "Credit-limit details (estimate)",
+        "Limit check details (estimate)",
     "平均月收入 (萬)":
         "Average monthly income (in NT$10,000)",
     "既有無擔保債務 (萬)":
         "Existing unsecured debt (in NT$10,000)",
     "核貸倍數（估計）(倍)":
-        "Approval multiple (estimate) (times)",
+        "Approval multiple (× income, estimate)",
     "產品最高額度 (萬)":
         "Product maximum (in NT$10,000)",
     "貸款金額怎麼決定":
@@ -1080,17 +1080,17 @@ EN = {
     "你的既有無擔保債務 {d} 萬，已經用完法規上限（平均月收入 {inc} 萬 × 22 ＝ {gross} 萬）。依規定，不能再借信貸。":
         "Your existing unsecured debt of {d} has used up the legal limit (average monthly income {inc} × 22 = {gross}). By regulation, you can't borrow another personal loan.",
     "信貸額度：既有無擔保債務已用完法規上限，無法再借":
-        "Credit limit: existing unsecured debt has used up the legal limit, so you can't borrow more",
+        "Personal loan limit: existing unsecured debt has used up the legal limit, so you can't borrow more",
     "用估計的可核貸金額算出來是 0 萬，無法計算。請改成「自己輸入」，或調高核貸倍數。":
-        "The estimated approvable amount comes to NT$0, so it can't be calculated. Change the setting to \"Enter it myself\", or raise the approval multiple.",
+        "The typical approval estimate comes to NT$0, so it can't be calculated. Change the setting to \"Enter my own amount\", or raise the approval multiple.",
     "信貸額度：用估計的可核貸金額算出來是 0 萬，無法計算":
-        "Credit limit: the estimated approvable amount comes to NT$0, so it can't be calculated",
+        "Personal loan limit: the typical approval estimate comes to NT$0, so it can't be calculated",
     "填平均月收入可以檢查信貸額度。":
-        "Enter your average monthly income to check the credit limit.",
+        "Enter your average monthly income to check the personal loan limit.",
     "依新聞報導：2026-10-31 起，信貸的資金用途如果寫「投資理財」，銀行要先經你同意，才能查詢你在券商的借貸（例如融資）。你不同意，就辦不成。":
         "According to news reports: from 2026-10-31, if you state \"investing\" as the purpose of a personal loan, the bank must first get your consent before it can look up your brokerage borrowing (for example margin loans). If you don't consent, the loan can't be made.",
     "信貸額度是估計。各銀行條件常變動，以銀行核定為準。":
-        "The credit limit is an estimate. Bank conditions change often. The bank's own approval is what counts.",
+        "The personal loan limit is an estimate. Bank conditions change often. The bank's own approval is what counts.",
     "未檢查（沒有填平均月收入）":
         "Not checked (no average monthly income entered)",
     "超限":
@@ -1098,7 +1098,7 @@ EN = {
     "灰底「超限」的格子：貸款本金超過可借上限 {cap} 萬，銀行不會核貸，所以不計算。":
         "Cells marked \"Over\" on grey: the loan is over the borrowing limit of {cap}. A bank won't approve it, so it isn't calculated.",
     "貸款本金 {y} 超過可借上限 {cap} 萬，無法計算":
-        "A loan of {y} is over the borrowing limit of {cap}, so it can't be calculated",
+        "A loan amount of {y} is over the borrowing limit of {cap}, so it can't be calculated",
     "以目前其他設定，就算借到可借上限 **{cap} 萬**，破產機率也只有 {r}，仍在 {t} 以下（你目前設定 {cur} 萬）。":
         "Even at the borrowing limit of **{cap}**, the chance of default is only {r}, within {t} (you entered {cur}).",
     "{cap} 萬（可借上限）":
@@ -1146,7 +1146,7 @@ EN = {
     "未來情境的年度報酬率必須大於 -100%。":
         "The yearly returns of the future scenario must be above -100%.",
     "蒙地卡羅次數必須介於 1 與 100,000。":
-        "The number of Monte Carlo runs must be between 1 and 100,000.",
+        "The number of Monte Carlo trials must be between 1 and 100,000.",
     "區塊長度至少 1 個月。":
         "The block length must be at least 1 month.",
     "未知的 DCA 對照模式：{dca_mode}":
