@@ -159,22 +159,55 @@ def choice(key, label, options, default, universe=None, widget=None, by_value=Fa
     Links store the position of the choice within `universe` (the full, fixed list of
     possibilities) so they stay valid if labels are reworded; `by_value` stores the text
     itself, for lists that depend on data.
+
+    The options are Chinese texts that double as stored values. The widget itself is given the texts
+    as they read in the page language, so what it holds and shows is already translated and never
+    depends on `format_func` (a browser that keeps a selected value while the option list changes
+    would show the raw Chinese one). The caller still gets the stored (Chinese) value back, and the
+    choice is kept in `_c_<key>` so a language switch re-labels it without changing it.
     """
-    kwargs.setdefault("format_func", i18n.labeller())  # the stored values are Chinese texts; show them in the page language
     options = list(options)
     universe = list(universe) if universe is not None else options
     if default not in options:
         default = options[0]
-    _seed(key, default, (lambda raw: raw) if by_value else (lambda raw: universe[int(raw)]))
-    if st.session_state[key] not in options:
-        st.session_state[key] = default
-    value = (widget or st.selectbox)(label, options, key=key, **kwargs)
+    labels = [t(o) if isinstance(o, str) else o for o in options]
+    if len(set(labels)) < len(labels):  # two options that read the same: keep them apart
+        labels = list(options)
+    to_label = dict(zip(options, labels))
+    from_label = dict(zip(labels, options))
+    canon_key = f"_c_{key}"
+    if canon_key not in st.session_state:
+        _seed(key, default, (lambda raw: raw) if by_value else (lambda raw: universe[int(raw)]))
+        shown = st.session_state[key]
+        current = from_label.get(shown, shown)
+    else:
+        shown = st.session_state.get(key)
+        current = from_label.get(shown, st.session_state[canon_key])  # a label of another language: keep the choice
+    if current not in options:
+        current = default
+    st.session_state[key] = to_label[current]
+    st.session_state[canon_key] = current
+    picked = (widget or st.selectbox)(label, labels, key=key, **kwargs)
+    value = from_label[picked]
+    st.session_state[canon_key] = value
 
     def fmt(v):
         return str(v) if by_value else str(universe.index(v))
 
     _remember(key, fmt(value), fmt(default))
     return value
+
+
+def chosen(key, options):
+    """The stored (Chinese) value of choice `key` from its widget state, which holds the page-language text.
+
+    Meant for widget callbacks, which run before the page redraws the widget.
+    """
+    shown = st.session_state.get(key)
+    for option in options:
+        if shown == option or (isinstance(option, str) and shown == t(option)):
+            return option
+    return None
 
 
 def text(key, label, default, clean, **kwargs):

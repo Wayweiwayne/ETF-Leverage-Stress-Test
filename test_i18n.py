@@ -380,10 +380,12 @@ class SwitchingTests(AppHarness, unittest.TestCase):
     def test_switch_keeps_every_setting(self):
         query = {"loan": "150", "rate": "3.2", "type": "0", "jl": "1", "scen": "1", "dfreq": "2", "salary": "30000"}
         at = self.start(**query)
-        mine = {k: at.session_state[k] for k in query}
+        def stored(app):  # choice widgets hold the page-language text; the choice itself is kept in _c_<key>
+            return {k: app.session_state[f"_c_{k}"] if f"_c_{k}" in app.session_state else app.session_state[k] for k in query}
+        mine = stored(at)
         self.lang_control(at).set_value("en")
         at = self.ok(at.run())
-        self.assertEqual({k: at.session_state[k] for k in query}, mine)
+        self.assertEqual(stored(at), mine)
         for key, value in query.items():
             self.assertEqual(str(at.query_params[key][0] if isinstance(at.query_params[key], list) else at.query_params[key]), value)
 

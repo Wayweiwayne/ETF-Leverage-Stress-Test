@@ -214,7 +214,7 @@ TOAST_KEY = "_loan_type_toast"
 def reset_loan_defaults():
     """Switching the loan type brings the new type's defaults, the amount included."""
     ui.forget("rate", "years", "grace", "grace_y", "loan")
-    new_type = st.session_state.get("type")
+    new_type = ui.chosen("type", LOAN_TYPES)
     if new_type in LOAN_DEFAULTS:
         rate, years, grace = LOAN_DEFAULTS[new_type]
         st.session_state[TOAST_KEY] = credit.switch_toast(
