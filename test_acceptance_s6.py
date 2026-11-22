@@ -6,12 +6,18 @@
 6-2  The exchange's ex-dividend table (exRight/TWT49U) is preferred over Yahoo's dividends; when it cannot
      be read the old source is used and the page says so, in both languages.
 """
+import os
+import re
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 import engine as E
+import i18n
+import market_data as md
 import test_engine as T
 
 # Produced by the V40 engine (git 56a4d76) on test_engine.market()/params(); see test_acceptance_s6 6-1 notes.
@@ -235,6 +241,311 @@ class SecondAssetDividendTests(unittest.TestCase):
             res.append(E.run_summary(aligned, T.params(total_months=60)))
         self.assertGreater(res[0].hist.Lev_Final.sum(), res[1].hist.Lev_Final.sum())
         self.assertGreater(res[0].mc.Lev_Final.sum(), res[1].mc.Lev_Final.sum())
+
+
+
+
+# ---------------------------------------------------------------- 6-2
+CJK = re.compile("[\u2e80-\u9fff\uac00-\ud7af\uff00-\uffef\u3000-\u303f]")
+FIELDS_OLD = ["資料日期", "股票代號", "股票名稱", "除權息前收盤價", "除權息參考價", "權值", "息值", "權值+息值", "權/息"]
+FIELDS_NEW = ["資料日期", "股票代號", "股票名稱", "除權息前收盤價", "除權息參考價", "權值+息值", "權/息", "漲停價格"]
+
+
+def table(rows):
+    t = pd.DataFrame(rows, columns=["Date", "Code", "Cash", "Kind"])
+    t["Date"] = pd.to_datetime(t["Date"])
+    t.attrs.update(fetched_at="2026-11-22T00:00:00Z", years=[2024])
+    return t
+
+
+def daily_history(start="2008-01-02", end="2021-12-31", seed=1, splits=None):
+    days = pd.bdate_range(start, end)
+    close = 50 * np.cumprod(1 + np.random.RandomState(seed).normal(0.0003, 0.008, len(days)))
+    df = pd.DataFrame({"Close": close, "Dividends": 0.0}, index=days)
+    df.attrs.update(ticker="0056.TW", data_source="live", fetched_at="2026-11-22T00:00:00Z")
+    return df
+
+
+def monthly_div(df, ticker, events, **kw):
+    with patch.object(md, "dividend_events", return_value=events):
+        return md.monthly_data(md.attach_official_dividends(df, ticker), 1, **kw)
+
+
+def english(note):
+    with i18n.use("en"):
+        return i18n.t(note)
+
+
+class OfficialDividendTests(unittest.TestCase):
+    """6-2."""
+
+    def test_official_events_replace_yahoo_dividends(self):
+        df = daily_history()
+        df.loc["2020-03-16", "Dividends"] = 0.5            # what Yahoo says
+        df.loc["2019-09-16", "Dividends"] = 0.4
+        events = table([("2020-03-16", "0056", 0.9, "息"), ("2010-10-18", "0056", 0.85, "息")])
+        m = monthly_div(df, "0056.TW", events)
+        paid = m["Monthly_Div"][m["Monthly_Div"] > 0]
+        self.assertEqual(sorted(round(v, 6) for v in paid), [0.85, 0.9])           # Yahoo's two are gone
+        self.assertEqual(m.attrs["data_source"], "live")
+        self.assertFalse([r for r in m.attrs["repairs"] if "Yahoo" in str(r)])      # no fallback note
+
+    def test_rights_rows_are_not_dividends_and_other_codes_ignored(self):
+        events = table([("2020-03-16", "0056", 0.9, "息"), ("2020-06-15", "0056", 3.0, "權"),
+                        ("2020-03-16", "0050", 5.0, "息")])
+        m = monthly_div(daily_history(), "0056.TW", events)
+        self.assertEqual(list(m["Monthly_Div"][m["Monthly_Div"] > 0].round(6)), [0.9])
+
+    def test_etf_in_table_without_dividends_gets_none_not_yahoo(self):
+        df = daily_history()
+        df.loc["2020-03-16", "Dividends"] = 0.5
+        m = monthly_div(df, "0056.TW", table([("2020-03-16", "0050", 5.0, "息")]))   # 0056 absent: Yahoo, with note
+        self.assertEqual(round(m["Monthly_Div"].sum(), 6), 0.5)
+        self.assertTrue([r for r in m.attrs["repairs"] if "Yahoo" in str(r)])
+
+    # ---- fallback notices
+    def fallback_notes(self, ticker, events, with_dividends=True):
+        df = daily_history()
+        if with_dividends:
+            df.loc["2020-03-16", "Dividends"] = 0.5
+        m = monthly_div(df, ticker, events)
+        return [r for r in m.attrs["repairs"] if "Yahoo" in str(r)], m
+
+    def test_unavailable_table_falls_back_with_notice_in_both_languages(self):
+        notes, m = self.fallback_notes("0056.TW", None)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(round(m["Monthly_Div"].sum(), 6), 0.5)      # Yahoo's dividend still used
+        en = english(notes[0])
+        self.assertIn("Yahoo", en)
+        self.assertIsNone(CJK.search(en), en)
+        self.assertIsNotNone(CJK.search(str(notes[0])))
+
+    def test_etf_missing_from_table_notice_both_languages(self):
+        notes, _ = self.fallback_notes("0056.TW", table([("2020-03-16", "0050", 5.0, "息")]))
+        self.assertEqual(len(notes), 1)
+        self.assertIsNone(CJK.search(english(notes[0])))
+        other, _ = self.fallback_notes("0056.TW", None)
+        self.assertNotEqual(str(notes[0]), str(other[0]))            # a different reason, a different sentence
+
+    def test_no_notice_for_non_paying_or_non_tw(self):
+        events = table([("2020-03-16", "0050", 5.0, "息")])
+        for ticker, unavailable in (("00631L.TW", events), ("00631L.TW", None)):
+            with self.subTest(ticker=ticker, table=unavailable is not None):
+                notes, _ = self.fallback_notes(ticker, unavailable, with_dividends=False)
+                self.assertEqual(notes, [])
+        for ticker in ("SPY", "2330.TW", "00679B.TWO", "^TWII"):
+            with self.subTest(ticker=ticker):
+                notes, m = self.fallback_notes(ticker, None)
+                self.assertEqual(notes, [])
+                self.assertEqual(round(m["Monthly_Div"].sum(), 6), 0.5)    # untouched
+                self.assertNotIn("official_status", md.attach_official_dividends(daily_history(), ticker).attrs)
+
+    # ---- parsing
+    def payload(self, fields, rows):
+        return {"fields": fields, "data": rows}
+
+    def test_old_layout_prefers_cash_column(self):
+        rows = [["94年05月19日", "0050", "元大台灣50", "50.0", "48.0", 0.0, 1.85, "1.85", "息"],
+                ["97年10月24日", "0050", "元大台灣50", "50.0", "48.0", 5.0, 2.0, "7.00", "權息"],
+                ["97年10月24日", "2330", "台積電", "50.0", "48.0", 0.0, 3.0, "3.00", "息"]]
+        ev = md.parse_twse_events(self.payload(FIELDS_OLD, rows))
+        self.assertEqual(ev, [(pd.Timestamp(2005, 5, 19), "0050", 1.85, "息"),
+                              (pd.Timestamp(2008, 10, 24), "0050", 2.0, "權息")])
+
+    def test_new_layout_commas_and_roc_dates(self):
+        rows = [["114年01月17日", "0050", "元大台灣50", "198.05", "195.35", "2.70", "息", "x"],
+                ["113年01月17日", "00878", "國泰永續高股息", "20", "19", "1,234.5", "息", "x"],
+                ["114年10月23日", "00631L", "元大台灣50正2", "20", "19", "0.0", "息", "x"],
+                ["114年10月23日", "1101", "台泥", "20", "19", "1.0", "息", "x"],
+                ["114年10月23日", "00679B", "債券", "20", "19", "0.3", "息", "x"]]
+        ev = md.parse_twse_events(self.payload(FIELDS_NEW, rows))
+        self.assertEqual([(d, c, v) for d, c, v, _ in ev],
+                         [(pd.Timestamp(2025, 1, 17), "0050", 2.7), (pd.Timestamp(2024, 1, 17), "00878", 1234.5),
+                          (pd.Timestamp(2025, 10, 23), "00631L", 0.0), (pd.Timestamp(2025, 10, 23), "00679B", 0.3)])
+
+    def test_empty_and_unknown_layouts(self):
+        self.assertEqual(md.parse_twse_events({"fields": [], "data": []}), [])
+        with self.assertRaises((ValueError, KeyError)):
+            md.parse_twse_events({"fields": ["a", "b"], "data": [["x", "y"]]})
+
+    def test_roc_date(self):
+        self.assertEqual(md._roc_date("114年01月17日"), pd.Timestamp(2025, 1, 17))
+        self.assertEqual(md._roc_date("94/05/19"), pd.Timestamp(2005, 5, 19))
+
+    # ---- splits
+    def test_dividend_before_unadjusted_split_is_converted_by_the_ratio(self):
+        df = daily_history("2024-01-02", "2025-12-31")
+        seam = pd.Timestamp("2025-06-30")
+        df.loc[df.index < seam, "Close"] *= 4.0            # the source never adjusted the 1:4 split
+        events = table([("2025-01-17", "0050", 2.70, "息"), ("2025-07-21", "0050", 0.36, "息")])
+        df.attrs["ticker"] = "0050.TW"
+        m = monthly_div(df, "0050.TW", events)
+        paid = m["Monthly_Div"][m["Monthly_Div"] > 0]
+        self.assertEqual([round(v, 6) for v in paid], [0.675, 0.36])
+        self.assertTrue(any("拆" in str(r) or "股票分割" in str(r) for r in m.attrs["repairs"]))
+
+    def test_dividend_before_reported_split_is_converted_by_the_ratio(self):
+        df = daily_history("2024-01-02", "2025-12-31")
+        df["Stock Splits"] = 0.0
+        df.loc["2025-06-30", "Stock Splits"] = 4.0         # reported, prices already adjusted
+        df.attrs["ticker"] = "0050.TW"
+        events = table([("2025-01-17", "0050", 2.70, "息"), ("2025-07-21", "0050", 0.36, "息")])
+        m = monthly_div(df, "0050.TW", events)
+        paid = m["Monthly_Div"][m["Monthly_Div"] > 0]
+        self.assertEqual([round(v, 6) for v in paid], [0.675, 0.36])
+
+    def test_no_split_leaves_cash_as_is(self):
+        m = monthly_div(daily_history(), "0056.TW", table([("2015-03-16", "0056", 0.85, "息")]))
+        self.assertEqual(round(m["Monthly_Div"].sum(), 6), 0.85)
+
+    # ---- incremental update
+    def fake_exchange(self, calls, fail=(), empty=()):
+        def get(path, **params):
+            calls.append((path, params["startDate"], params["endDate"]))
+            year = int(params["startDate"][:4])
+            if year in fail:
+                raise ConnectionError("blocked")
+            if year in empty:     # the exchange's "no data" reply: no fields, no rows
+                return {"fields": [], "data": []}
+            return {"fields": FIELDS_NEW, "data": [[f"{year - 1911}年03月16日", "0056", "x", "1", "1", "0.5", "息", "x"]]}
+        return get
+
+    def test_only_new_years_and_the_last_two_are_fetched(self):
+        known = table([("2003-06-01", "0050", 1.0, "息")])
+        calls = []
+        with patch.object(md, "_twse_get", side_effect=self.fake_exchange(calls)):
+            out, years = md.fetch_twse_events(known, range(2003, 2025), today=pd.Timestamp("2026-03-10"), log=lambda *_: None)
+        self.assertEqual(sorted({int(c[1][:4]) for c in calls}), [2025, 2026])
+        self.assertEqual(years[0], 2003)
+        self.assertEqual(years[-1], 2026)
+        self.assertIn(pd.Timestamp("2003-06-01"), set(out["Date"]))     # old rows kept
+        self.assertEqual(calls[-1][2], "20260309")                      # never reaches the current day
+
+    def test_first_run_starts_at_the_exchanges_first_day(self):
+        calls = []
+        with patch.object(md, "_twse_get", side_effect=self.fake_exchange(calls)):
+            out, years = md.fetch_twse_events(None, (), today=pd.Timestamp("2005-02-10"), log=lambda *_: None)
+        self.assertEqual(calls[0][1:], ("20030505", "20031231"))
+        self.assertEqual(years, [2003, 2004, 2005])
+        self.assertEqual(len(out), 3)
+
+    def test_failed_year_keeps_old_rows_and_is_retried_later(self):
+        known = table([("2025-03-16", "0056", 9.9, "息")])
+        calls = []
+        with patch.object(md, "_twse_get", side_effect=self.fake_exchange(calls, fail=(2025,))):
+            out, years = md.fetch_twse_events(known, range(2003, 2026), today=pd.Timestamp("2026-03-10"), log=lambda *_: None)
+        self.assertIn(9.9, list(out["Cash"]))                           # not lost
+        self.assertEqual(years, sorted(set(years)))
+        self.assertIn(2026, years)
+        self.assertIn(2025, years)                                      # it was already covered before; stays so
+
+    def test_failed_new_year_is_not_marked_done(self):
+        calls = []
+        with patch.object(md, "_twse_get", side_effect=self.fake_exchange(calls, fail=(2004,))):
+            _, years = md.fetch_twse_events(None, (), today=pd.Timestamp("2005-02-10"), log=lambda *_: None)
+        self.assertEqual(years, [2003, 2005])
+
+    def test_first_year_without_any_event_from_an_empty_start(self):
+        """Found on GitHub Actions: 2003 has no ETF rows, the empty table's Date column was not datetime."""
+        calls = []
+        with patch.object(md, "_twse_get", side_effect=self.fake_exchange(calls, empty=(2003,))):
+            out, years = md.fetch_twse_events(None, (), today=pd.Timestamp("2005-02-10"), log=lambda *_: None)
+        self.assertEqual(years, [2003, 2004, 2005])                 # an empty year is still a year done
+        self.assertEqual(sorted(out["Date"].dt.year.unique()), [2004, 2005])
+
+    def test_year_in_the_middle_without_events(self):
+        calls = []
+        with patch.object(md, "_twse_get", side_effect=self.fake_exchange(calls, empty=(2004,))):
+            out, years = md.fetch_twse_events(None, (), today=pd.Timestamp("2006-02-10"), log=lambda *_: None)
+        self.assertEqual(years, [2003, 2004, 2005, 2006])
+        self.assertEqual(sorted(out["Date"].dt.year.unique()), [2003, 2005, 2006])
+
+    def test_every_year_empty_and_known_table_survives_an_empty_year(self):
+        calls = []
+        with patch.object(md, "_twse_get", side_effect=self.fake_exchange(calls, empty=range(2003, 2030))):
+            out, years = md.fetch_twse_events(None, (), today=pd.Timestamp("2005-02-10"), log=lambda *_: None)
+            self.assertTrue(out.empty)
+            self.assertEqual(list(out.columns), ["Date", "Code", "Cash", "Kind"])
+            known = table([("2025-03-16", "0056", 9.9, "息")])
+            out2, _ = md.fetch_twse_events(known, range(2003, 2025), today=pd.Timestamp("2026-03-10"), log=lambda *_: None)
+        self.assertEqual(list(out2["Cash"]), [])                    # 2025 re-fetched as empty: the exchange is the authority
+        with tempfile.TemporaryDirectory() as d:                    # and an empty table can still be written and read back
+            md.write_dividend_events(out, years, d)
+            back = md.parse_dividend_events(open(os.path.join(d, md.DIVIDENDS_FILE), encoding="utf-8").read())
+        self.assertTrue(back is None or back.empty)
+
+    # ---- files, backups
+    def test_file_roundtrip_and_header_format(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = table([("2024-01-17", "0050", 3.0, "息"), ("2024-02-01", "0056", 0.7, "息")])
+            path = md.write_dividend_events(t, [2023, 2024], d)
+            lines = open(path, encoding="utf-8").read().split("\n")
+            self.assertTrue(lines[0].startswith("# fetched_at="))
+            self.assertEqual(lines[1], "# years=2023,2024")
+            self.assertEqual(lines[2], "Date,Code,Cash,Kind")
+            back = md.parse_dividend_events(open(path, encoding="utf-8").read())
+            self.assertEqual(back.attrs["years"], [2023, 2024])
+            self.assertEqual(list(back["Code"]), ["0050", "0056"])
+            self.assertEqual(list(back["Cash"]), [3.0, 0.7])
+
+    def test_unusable_files_are_ignored(self):
+        for text in ("", "<html>blocked</html>", "# years=1\nDate,Code\n2024-01-01,0050\n",
+                     "Date,Code,Cash,Kind\n2024-01-01,0050,,息\n"):
+            with self.subTest(text[:20]):
+                self.assertIsNone(md.parse_dividend_events(text))
+
+    def test_listed_extras_never_reads_the_event_table_as_a_ticker(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("0050.TW.csv", md.DIVIDENDS_FILE, "index.csv"):
+                open(os.path.join(d, name), "w").close()
+            with patch.object(md, "SEED_DIR", d):
+                extras = md._listed_extras()
+        self.assertIn("0050.TW", extras)
+        self.assertNotIn(md.DIVIDENDS_FILE[:-4], extras)
+
+    def test_old_backups_without_the_event_table_still_work(self):
+        """A mirror or snapshot folder from before 6-2 has price files only."""
+        with tempfile.TemporaryDirectory() as d, patch.object(md, "SNAPSHOT_DIR", d), patch.object(md, "SEED_DIR", d), \
+                patch.object(md, "MIRROR_URL", ""):
+            md._events_cache.update(at=float("-inf"), table=None)
+            df = daily_history("2020-01-02", "2020-12-31")
+            df.loc["2020-03-16", "Dividends"] = 0.5
+            md.save_snapshot(df, "0056.TW")
+            old = md.read_snapshot("0056.TW")
+            self.assertEqual(float(old["Dividends"].sum()), 0.5)
+            self.assertIsNone(md.dividend_events())
+            attached = md.attach_official_dividends(old, "0056.TW")
+            self.assertEqual(attached.attrs["official_status"], "unavailable")
+            self.assertEqual(round(md.monthly_data(attached, 1)["Monthly_Div"].sum(), 6), 0.5)
+        md._events_cache.update(at=float("-inf"), table=None)
+
+    def test_event_table_beside_price_files_is_read_and_cached(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(md, "SNAPSHOT_DIR", d), patch.object(md, "SEED_DIR", ""), \
+                patch.object(md, "MIRROR_URL", ""):
+            md._events_cache.update(at=float("-inf"), table=None)
+            t = table([("2015-03-16", "0056", 0.85, "息")])
+            md.write_dividend_events(t, [2015], d)
+            # an old copy still counts when nothing newer exists
+            got = md.dividend_events()
+            self.assertEqual(list(got["Code"]), ["0056"])
+            attached = md.attach_official_dividends(daily_history(), "0056.TW")
+            self.assertEqual(attached.attrs["official_status"], "official")
+        md._events_cache.update(at=float("-inf"), table=None)
+
+    def test_refresh_writes_the_file_and_cli_flags_exist(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as d, patch.object(md, "MIRROR_URL", ""), \
+                patch.object(md, "_twse_get", side_effect=self.fake_exchange(calls)), \
+                patch.object(md, "_today", return_value=pd.Timestamp("2005-02-10")):
+            n = md.refresh_dividend_events(d, log=lambda *_: None)
+            self.assertEqual(n, 3)
+            self.assertTrue(os.path.exists(os.path.join(d, md.DIVIDENDS_FILE)))
+            before = len(calls)
+            md.refresh_dividend_events(d, log=lambda *_: None)             # incremental: only the last two years
+            self.assertEqual(len(calls) - before, 2)
+        src = open(md.__file__, encoding="utf-8").read()
+        self.assertIn('"--twse-dividends"', src)
+        self.assertIn('"--dividends-only"', src)
 
 
 if __name__ == "__main__":

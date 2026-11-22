@@ -426,6 +426,12 @@ def parse_twse_events(payload):
     return events
 
 
+def _events_frame(rows=()):
+    """A dividend table with fixed column types, also when it has no rows: Date datetime64, Code and Kind text, Cash float."""
+    frame = pd.DataFrame(list(rows), columns=["Date", "Code", "Cash", "Kind"])
+    return frame.astype({"Date": "datetime64[ns]", "Code": "object", "Cash": "float64", "Kind": "object"})
+
+
 def fetch_twse_events(known=None, years_done=(), today=None, log=print):
     """Bring the official dividend table up to date. Returns (table, years covered).
 
@@ -435,9 +441,7 @@ def fetch_twse_events(known=None, years_done=(), today=None, log=print):
     """
     today = today if today is not None else _today()
     last_day = today - pd.Timedelta(days=1)   # the exchange refuses ranges that reach the current day
-    frames = [] if known is None or known.empty else [known]
-    table = pd.concat(frames) if frames else pd.DataFrame(columns=["Date", "Code", "Cash", "Kind"])
-    table["Date"] = pd.to_datetime(table["Date"])
+    table = _events_frame() if known is None else _events_frame(known[["Date", "Code", "Cash", "Kind"]].itertuples(index=False))
     done = set(years_done)
     for year in range(_TWSE_FIRST_DAY.year, today.year + 1):
         if year in done and year < today.year - 1:
@@ -452,11 +456,12 @@ def fetch_twse_events(known=None, years_done=(), today=None, log=print):
         except (OSError, ValueError, KeyError, IndexError) as exc:   # a refusal, an error status or an unexpected layout
             log(f"dividends {year}: FAILED ({exc})")
             continue
-        fresh = pd.DataFrame(events, columns=["Date", "Code", "Cash", "Kind"])
-        table = pd.concat([table[table["Date"].dt.year != year], fresh])
+        kept = table[table["Date"].dt.year != year]
+        fresh = _events_frame(events)
+        table = _events_frame(list(kept.itertuples(index=False)) + list(fresh.itertuples(index=False)))
         done.add(year)
         log(f"dividends {year}: {len(fresh)} ETF events")
-    table = table.drop_duplicates().sort_values(["Date", "Code"]).reset_index(drop=True)
+    table = _events_frame(table.drop_duplicates().sort_values(["Date", "Code"]).itertuples(index=False))
     return table, sorted(done)
 
 
@@ -465,8 +470,8 @@ def write_dividend_events(table, years, directory):
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, DIVIDENDS_FILE)
     tmp = f"{path}.{os.getpid()}.tmp"
-    out = table.copy()
-    out["Date"] = pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d")
+    out = _events_frame(table[["Date", "Code", "Cash", "Kind"]].itertuples(index=False))
+    out["Date"] = out["Date"].dt.strftime("%Y-%m-%d")
     with open(tmp, "w", encoding="utf-8", newline="") as fh:
         fh.write(f"# fetched_at={_now()}\n# years={','.join(str(y) for y in years)}\n")
         out.to_csv(fh, index=False)
@@ -478,9 +483,10 @@ def parse_dividend_events(text):
     """DIVIDENDS_FILE text -> table with attrs fetched_at and years, or None if unusable."""
     try:
         comments = [line[1:].strip() for line in text.split("\n") if line.startswith("#")]
-        table = pd.read_csv(io.StringIO(text), comment="#", dtype={"Code": str}, parse_dates=["Date"])
+        table = pd.read_csv(io.StringIO(text), comment="#", dtype={"Code": str, "Kind": str})
         if not {"Date", "Code", "Cash", "Kind"}.issubset(table.columns) or table["Cash"].isna().any():
             return None
+        table = _events_frame(table[["Date", "Code", "Cash", "Kind"]].itertuples(index=False))
     except (ValueError, KeyError):
         return None
     meta = dict(c.split("=", 1) for c in comments if "=" in c)

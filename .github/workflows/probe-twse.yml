@@ -1,4 +1,4 @@
-# Temporary: compares Yahoo and official TWSE dividends and times the official fetch. Remove after sprint 6.
+# Temporary: compares Yahoo and official TWSE dividends and times the official fetch. Remove after sprint 6. (rerun 2)
 name: probe-twse
 on:
   push:

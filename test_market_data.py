@@ -1111,6 +1111,53 @@ class OfficialDividendTests(IsolatedSnapshots):
         self.assertEqual([a[0][:4] for a in self.asked], ["2025"])       # 2026 has no finished day yet
         self.assertNotIn(2026, years)
 
+    # ----- empty years and empty tables keep their column types -----
+    def assert_typed(self, table):
+        self.assertEqual(str(table["Date"].dtype), "datetime64[ns]")
+        self.assertEqual(str(table["Cash"].dtype), "float64")
+        self.assertEqual(list(table.columns), ["Date", "Code", "Cash", "Kind"])
+
+    def serve_empty_until(self, first_year):
+        def answer(path, **params):
+            year = int(params["startDate"][:4])
+            rows = [] if year < first_year else [new_row(f"{year - 1911}年03月10日", "0056", "1.5")]
+            return self.reply(NEW_FIELDS, rows)
+        self.twse_get.side_effect = answer
+
+    def test_fetch_from_nothing_when_the_first_years_have_no_events(self):
+        self.serve_empty_until(2005)
+        table, years = market_data.fetch_twse_events(today=pd.Timestamp("2006-06-01"), log=lambda *_: None)
+        self.assertEqual(years, [2003, 2004, 2005, 2006])
+        self.assertEqual(len(table), 2)
+        self.assert_typed(table)
+
+    def test_a_year_without_events_between_years_with_events(self):
+        self.serve_empty_until(2003)
+        table, years = market_data.fetch_twse_events(today=pd.Timestamp("2005-06-01"), log=lambda *_: None)
+        self.serve_empty_until(2099)                                     # now 2004 and 2005 come back empty
+        again, _ = market_data.fetch_twse_events(table, years, today=pd.Timestamp("2005-06-01"), log=lambda *_: None)
+        self.assertEqual(again["Date"].dt.year.tolist(), [2003])         # replaced by the empty answers
+        self.assert_typed(again)
+
+    def test_every_year_empty_gives_an_empty_typed_table_that_round_trips(self):
+        self.serve_empty_until(2099)
+        table, years = market_data.fetch_twse_events(today=pd.Timestamp("2005-06-01"), log=lambda *_: None)
+        self.assertEqual((len(table), years), (0, [2003, 2004, 2005]))
+        self.assert_typed(table)
+        directory = os.path.join(self.cache_dir, "empty")
+        market_data.write_dividend_events(table, years, directory)
+        back = market_data._stored_events(directory)
+        self.assertEqual((len(back), back.attrs["years"]), (0, [2003, 2004, 2005]))
+        self.assert_typed(back)
+
+    def test_header_only_file_is_a_valid_empty_table(self):
+        back = market_data.parse_dividend_events("# years=2003\nDate,Code,Cash,Kind\n")
+        self.assertEqual(len(back), 0)
+        self.assert_typed(back)
+        self.serve_empty_until(2099)
+        again, _ = market_data.fetch_twse_events(back, [2003], today=pd.Timestamp("2004-06-01"), log=lambda *_: None)
+        self.assert_typed(again)
+
     # ----- file format -----
     def table(self):
         return pd.DataFrame([(pd.Timestamp("2025-01-17"), "0050", 2.7, "息"), (pd.Timestamp("2025-07-21"), "0050", 0.36, "息"),
