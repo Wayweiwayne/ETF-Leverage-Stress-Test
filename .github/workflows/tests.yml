@@ -26,5 +26,5 @@ jobs:
       - name: Tests with coverage (report only, no threshold)
         if: matrix.python-version == '3.13'
         run: |
-          python -m coverage run --branch --omit='test_*.py,.venv/*' -m unittest -v
-          python -m coverage report -m --skip-empty
+          python -m coverage run --branch --source=. --omit='test_*.py,.venv/*,.github/*' -m unittest -v
+          python -m coverage report -m --skip-empty --ignore-errors
