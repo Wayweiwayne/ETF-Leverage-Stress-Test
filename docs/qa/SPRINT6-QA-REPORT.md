@@ -1,30 +1,50 @@
-# 衝刺 6 QA 報告（進行中：6-2 待驗）
+# 衝刺 6 QA 報告
+
+結論：6-1、6-2、6-3 全部通過。完整測試 835 個全過（Python 3.13，含 coverage），pyflakes 乾淨。
 
 ## 6-3 第 44 項
-- 新增 `test_ui_state.py`（56 個測試，1 個 expectedFailure 對應缺陷 D1）。涵蓋預設值不進網址、無效值退回預設、數值夾範圍與步進、
-  choice（位置／by_value／universe／`_c_<key>` 語言切換／重複譯文）、pin 與 migrate、checkbox/toggle、text、language_switch、begin/end/forget。
-- `.github/workflows/tests.yml`：新增 `pip install coverage` 與 `coverage run --branch ... -m unittest -v`、`coverage report -m`，不設門檻。
-  沒有 requirements-dev.txt，所以沒有動 requirements.txt。
-- 覆蓋率（V40 乾淨檢出，702 個測試，--branch）：ui_state.py 92%、全專案 96%（2912 行／782 分支）。
-- 補測試後：ui_state.py 單獨跑 test_ui_state 即 98%（未涵蓋 2 行）；與全套合併的全專案數字待 RD 6-2 穩定後再跑（見下）。
-- 注意：加上 coverage 後完整測試單版本約 9–14 分鐘，CI 三個版本都會變慢。
+- 新增 `test_ui_state.py`（56 個測試）：預設值不進網址、無效值退回預設、數值夾範圍與步進、choice（位置、by_value、universe、`_c_<key>` 語言切換、重複譯文）、pin 與 migrate、checkbox／toggle、text、language_switch、begin／end／forget。
+- CI（`tests.yml`）：Python 3.13 用 coverage.py 跑測試並印報告，不設門檻；其他版本只跑測試。沒有 requirements-dev.txt，requirements.txt 沒動。
+- 覆蓋率（含分支）：
+
+| | ui_state.py | 全專案 |
+|---|---|---|
+| 補測試前（V40，702 個測試） | 92% | 96% |
+| 補測試後（835 個測試） | 100% | 97% |
+
+- 加 coverage 後完整測試約 9 到 15 分鐘。
 
 ## 6-1 第二標的配息：通過
-`test_acceptance_s6.py`（15 個測試）：
-- 不配息／欄位缺／全 NaN：歷史回測、蒙地卡羅、追蹤表、股息模型、壓力情境與 V40 引擎的數字逐位相同（GOLDEN 取自 V40）。
-- 配息有效：歷史與蒙地卡羅（同種子、同路徑）最終值皆上升；平價市場用獨立手算（含稅、ratio 0/0.5/1）吻合；稅額包含第二標的；定期定額對照組同樣計入。
-- PM 裁定（無真實紀錄的月份一律 0：上市前、假想未來、股息模型）已用測試固定；管線 monthly_data→align_months→引擎也通。
-- 第二標的歸零後不再買它、上市前 NaN 皆無 NaN 結果。
+`test_acceptance_s6.py`：
+- 第二標的不配息（欄位缺少、全 0、全 NaN）時，歷史回測、蒙地卡羅、追蹤表、股息模型與壓力情境的數字，與 V40 引擎逐位相同（GOLDEN 取自 V40）。
+- 有配息時，歷史回測與蒙地卡羅（同種子）最終值都上升。平價市場用獨立手算驗證，稅率 0 與 10%、再投入比例 0、0.5、1 都吻合；稅額包含第二標的；定期定額對照組也計入。
+- PM 裁定（沒有真實配息紀錄的月份一律 0：上市前、假想未來、股息模型）已用測試固定；monthly_data、align_months 到引擎的整條管線也通。
 
-## 6-2 官方配息：待驗
-- RD 已加入 `parse_twse_events`、`fetch_twse_events`、`dividend_events`、`attach_official_dividends`、`refresh_dividend_events` 等；PM 指示雲端連不上證交所，改到 GitHub Actions 探測。
-- 尚未寫驗收測試（優先序、退回來源與中英提示、假 TWT49U、分割換算、備份相容）；待 RD 介面穩定後補。
+## 6-2 官方配息：通過
+- 官方事件表存在時優先使用，Yahoo 的配息被取代，並補上 Yahoo 缺的 2013 年以前配息；「權」列不算配息，其他代號被忽略。
+- 退回 Yahoo 時，在「使用的資料」帶提示，中英文都測。表讀不到與表裡沒有這檔是兩句不同的話。00631L、不配息的標的、非 .TW 標的不提示，也不被改動。
+- 新舊欄位格式、逗號、民國年日期都能解析；舊格式優先取「息值」欄。
+- 分割前的配息依還原倍數換算：2.70 換算成 0.675，涵蓋「來源沒還原」與「來源有回報分割」兩種情形。
+- 增量更新：只抓新的年份與最近兩年；從 2003-05-05 起抓；不抓到當天；某年失敗時保留舊資料，也不標為完成。
+- 備份相容：檔頭格式、讀寫來回、壞檔忽略；`_listed_extras` 不把事件表當代號；沒有事件表的舊備份仍可用；兩個 CLI 參數存在。
+- GitHub Actions 實跑發現的缺陷（從頭抓取、2003 年沒有事件、空表的 Date 欄不是 datetime，導致 AttributeError）：已加三個測試，涵蓋第一年、中間年、全部空年。在有缺陷的版本上這三個會失敗，RD 修好後全過。
 
-## 完整測試
-- 我跑到時 RD 仍在改 6-2：779 個測試中 149 失敗，皆來自進行中狀態（例如 `test_standalone` 的 dist 與 build_standalone.py 不同步）。
-  這不是最終結果，待 RD 完成與重建 dist 後重跑。pyflakes 乾淨。
+## 回歸基準
+- 沒有任何數值基準被改動。對 test_engine 的改動只有內部函式回傳值多一項造成的解包調整，test_i18n 只在白名單加「息值」。
+- 預設設定的結果不變，已由 V40 GOLDEN 逐位比對確認。
 
-## 缺陷
-- D1（ui_state.py，退回 RD）：網址 `?<int slider>=inf`、`-inf`、`1e999` 使頁面崩潰（`_seed` 的 `except` 漏掉 OverflowError）。
-  修法：`_seed` 同時攔截 OverflowError。修好後移除 `test_ui_state.py` 內的 `@unittest.expectedFailure`。
-- D2（流程）：dist/ETF-Leverage-Stress-Test.html 與 6-1 的文字改動不同步，RD 需執行 `python build_standalone.py`。
+## 缺陷（皆已修正並驗過）
+- D1：網址帶 `inf`、`-inf` 或 `1e999` 給整數滑桿時頁面崩潰（`_seed` 沒攔截 OverflowError），RD 已修，測試已轉為一般測試。
+- D2：單機檔與原始碼不同步，RD 已重新產生。
+- D3：從頭抓官方配息時，空年份讓空表欄位型別不對而當掉，RD 已修，驗收測試已補。
+
+## 殘留風險
+- 沒有在雲端環境實際連證交所，只能依 GitHub Actions 的探測樣本與假回應驗證；欄位格式在 2008 到 2013 年之間改版的年份不明，因此用欄位名稱解析。
+
+## PM 補充：GitHub Actions 實測（2026-11-22，run 45043407002）
+
+- 從頭抓取官方配息 2003～2026 年：24 年、1,678 筆 ETF 配息事件，耗時 336 秒（每年約 14 秒）。
+- 0056：補上 Yahoo 缺的 2009（2.0）、2011（2.2）、2012（1.3），合計多 5.5 元；其他年份與 Yahoo 相同。
+- 0050：補上 2009～2012；修正 Yahoo 在 2013、2014 年沒有依 2025 年 1 拆 4 換算（多算 4 倍）；2022 年官方 1.25，Yahoo 1.3075。
+- 00878：與 Yahoo 完全相同。
+- 探測用的暫時 workflow 已移除。
