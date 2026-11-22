@@ -35,7 +35,7 @@ SCAN_SETUPS = {
 
 # V39 的分享連結與當時的結果（V39 程式、test_app.fake_history 假行情、固定亂數）。
 OLD_LINKS = {
-    "default": ({}, {
+    "default": (dict(loan="500"), {   # S46：預設本金改 100 萬，V39 預設情境要寫 loan=500
         "metrics": ["$67,199", "$67,199", "$0", "0.0%", "0.0%", "91.6%", "$4,609,599", "$3,332,274", "0.0%",
                     "97.3%", "$7,982,072", "$3,741,921"],
         "widgets": {"m": 71, "payday": 0, "p1": 0, "p2": 0, "p3": 0, "p4": 0, "p5": 0, "scen": 0, "dfreq": 0,
@@ -43,7 +43,7 @@ OLD_LINKS = {
                     "ratio_b": 50, "buf": 0, "div": 6.0, "div_beta": 0.5, "disc": 0.0, "dshare": 100, "loan": 500,
                     "salary": 25000, "fee": 0.1425, "stax": 0.1, "lfee": 0, "grace": False, "shock": False,
                     "float": False, "reinv": True, "jl": False, "hc": False, "swan": False, "drag": True,
-                    "fix": True, "seed": True, "nhi": True, "a": "00878.TW", "proxy": "0056.TW", "b": "00631L.TW"}}),
+                    "fix": True, "seed": True, "nhi": True, "a": "00878.TW", "proxy": "0056.TW", "b": "00631L.TW", "inc": 0}}),
     "mortgage": (dict(type="0", loan="800", rate="2.2", grace_y="2", salary="30000", swan="1", swan_m="18",
                       swan_d="35", m="2020-03"), {
         "metrics": ["$14,666", "$44,886", "$0", "0.0%", "94.4%", "$29,897,810", "$21,812,251", "0.0%", "98.6%",
@@ -71,7 +71,7 @@ OLD_LINKS = {
                     "path": "5, -10, 20"}}),
     "advanced": (dict(float="1", rpath="0.5, 0.25", rvol="0.5", block="0", dca="1", mcdiv="1", hc="1", hc_thr="15",
                       hc_pen="10", disc="1.5", drag="0", dfreq="2", div_beta="0.8", fee="0.2", stax="0.3",
-                      dshare="80", jl="1", jl_sal="5000", jl_start="6", jl_dur="9", payday="1"), {
+                      dshare="80", jl="1", jl_sal="5000", jl_start="6", jl_dur="9", payday="1", loan="500"), {
         "metrics": ["$67,199", "$67,199", "$0", "0.0%", "0.0%", "0.0%", "$3,425,135", "$8,521,461", "0.1%", "9.1%",
                     "$6,138,834", "$9,449,439"],
         "widgets": {"m": 71, "payday": 1, "p1": 0, "p2": 0, "p3": 0, "p4": 0, "p5": 0, "scen": 0, "dfreq": 2,
@@ -82,7 +82,7 @@ OLD_LINKS = {
                     "shock": False, "float": True, "reinv": True, "jl": True, "hc": True, "swan": False,
                     "drag": False, "fix": True, "seed": True, "nhi": True, "rpath": "0.5, 0.25", "a": "00878.TW",
                     "proxy": "0056.TW", "b": "00631L.TW"}}),
-    "no_reinvest": (dict(reinv="0", p1="1", p3="3", salary="20000", scen="1", a="OLD0050.TW"), {
+    "no_reinvest": (dict(reinv="0", p1="1", p3="3", salary="20000", scen="1", a="OLD0050.TW", loan="500"), {
         "metrics": ["$67,199", "$67,199", "$0", "4.8%", "7.0%", "67.4%", "$4,938,463", "$2,191,752", "7.7%", "77.7%",
                     "$10,344,649", "$3,418,694"],
         "widgets": {"m": 191, "payday": 0, "p1": 1, "p2": 0, "p3": 1, "p4": 0, "scen": 1, "dfreq": 0, "dca": 0,
@@ -285,13 +285,18 @@ class OldLinkTests(AppHarness, unittest.TestCase):
         for name, (query, expected) in OLD_LINKS.items():
             with self.subTest(name):
                 at = self.start(**query)
-                self.assertEqual(widget_snapshot(at), expected["widgets"], "各欄位的值應和 V39 相同")
+                widgets = dict(expected["widgets"])
+                legacy = query.get("type", "1") != "0"      # S46：type=1 的舊連結，inc 當成 0
+                if legacy:
+                    widgets["inc"] = 0
+                self.assertEqual(widget_snapshot(at), widgets, "各欄位的值應和 V39 相同（加上 S46 的 inc=0）")
                 self.assertEqual([m.value for m in at.metric], expected["metrics"], "主要結果應和 V39 相同")
                 got = {k: v[0] if isinstance(v, list) else v for k, v in at.query_params.items()}
-                self.assertEqual(got, query, "網址列應保留原本的參數，也不多出新參數的預設值")
+                self.assertEqual(got, {**query, "inc": "0"} if legacy else query,
+                                 "網址列應保留原本的參數；信貸舊連結多一個 inc=0（SPEC 12.5-5）")
 
     def test_default_first_payment_is_unchanged(self):
-        at = self.start()
+        at = self.start(loan="500")
         self.assertEqual(next(m.value for m in at.metric if m.label == "初期每月應繳"), "$67,199")
 
 

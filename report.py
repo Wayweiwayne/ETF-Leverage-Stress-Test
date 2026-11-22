@@ -5,6 +5,8 @@ Everything that came from the user or the data source is escaped.
 """
 from html import escape
 
+from i18n import is_en, lang as current_lang, t, use
+
 _STYLE = """
 body { font-family: -apple-system, "Segoe UI", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
        color: #1f2933; background: #fff; max-width: 1040px; margin: 0 auto; padding: 32px 20px 56px; line-height: 1.6; }
@@ -40,7 +42,7 @@ def _frame_table(frame):
 
 
 def build_report(*, title, version, generated, share_url, settings, data_notes, warnings, summaries,
-                 tables, figures, disclaimer, source_url):
+                 tables, figures, disclaimer, source_url, closing_notes=(), lang=None):
     """Return the report as one HTML document.
 
     settings   -- [(label, value)] describing the run
@@ -49,21 +51,31 @@ def build_report(*, title, version, generated, share_url, settings, data_notes, 
     summaries  -- [(heading, [(label, value)])], laid out side by side
     tables     -- [(heading, DataFrame of display strings, caption)]
     figures    -- [(heading, plotly figure, caption)]; charts load plotly from its CDN
+    closing_notes -- [text] added to the footer
+    lang       -- "zh" or "en", the language of the report's own wording; the page language when omitted
     """
+    with use(lang or current_lang()):
+        return _build(title, version, generated, share_url, settings, data_notes, warnings, summaries, tables,
+                      figures, disclaimer, source_url, closing_notes)
+
+
+def _build(title, version, generated, share_url, settings, data_notes, warnings, summaries, tables, figures,
+           disclaimer, source_url, closing_notes):
+    html_lang = "en" if is_en() else "zh-Hant"
     parts = [
-        "<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>",
+        f"<!doctype html><html lang='{html_lang}'><head><meta charset='utf-8'>",
         "<meta name='viewport' content='width=device-width, initial-scale=1'>",
         f"<title>{escape(title)}</title><style>{_STYLE}</style></head><body>",
         f"<h1>{escape(title)}</h1>",
-        f"<p class='meta'>版本 {escape(version)}｜產生時間 {escape(generated)}</p>",
+        "<p class='meta'>" + escape(t("版本 {version}｜產生時間 {generated}", version=version, generated=generated)) + "</p>",
     ]
     if share_url:
-        parts.append(f"<p class='meta'>用這個連結可以重現同一組設定：<a href='{escape(share_url, quote=True)}'>"
+        parts.append(f"<p class='meta'>{escape(t('用這個連結可以重現同一組設定：'))}<a href='{escape(share_url, quote=True)}'>"
                      f"{escape(share_url)}</a></p>")
 
-    parts.append("<h2>這次的設定</h2>" + _pairs_table(settings))
+    parts.append(f"<h2>{escape(t('這次的設定'))}</h2>" + _pairs_table(settings))
 
-    parts.append("<h2>主要結果</h2><div class='columns'>")
+    parts.append(f"<h2>{escape(t('主要結果'))}</h2><div class='columns'>")
     for heading, rows in summaries:
         parts.append(f"<div><h3>{escape(heading)}</h3>{_pairs_table(rows)}</div>")
     parts.append("</div>")
@@ -75,7 +87,8 @@ def build_report(*, title, version, generated, share_url, settings, data_notes, 
             parts.append(f"<p class='caption'>{escape(caption)}</p>")
 
     if figures:
-        parts.append("<h2>圖表</h2><p class='note'>圖表需要連上網路才會顯示（會從 plotly 的 CDN 載入繪圖程式）；滑鼠移上去可以看數值。</p>")
+        parts.append(f"<h2>{escape(t('圖表'))}</h2><p class='note'>"
+                     + escape(t("圖表需要連上網路才會顯示（會從 plotly 的 CDN 載入繪圖程式）；滑鼠移上去可以看數值。")) + "</p>")
     for position, (heading, figure, caption) in enumerate(figures):
         chart = figure.to_html(full_html=False, include_plotlyjs="cdn" if position == 0 else False,
                                config={"displaylogo": False})
@@ -85,10 +98,12 @@ def build_report(*, title, version, generated, share_url, settings, data_notes, 
         parts.append("</div>")
 
     if data_notes:
-        parts.append("<h2>使用的資料</h2><ul>" + "".join(f"<li>{escape(text)}</li>" for text in data_notes) + "</ul>")
+        parts.append(f"<h2>{escape(t('使用的資料'))}</h2><ul>" + "".join(f"<li>{escape(text)}</li>" for text in data_notes)
+                     + "</ul>")
 
-    parts.append(f"<div class='footer'><p>{escape(disclaimer)}</p>"
-                 f"<p>本程式為自由軟體，以 AGPL-3.0 授權，不提供任何擔保。原始碼："
+    parts.append("<div class='footer'>" + "".join(f"<p>{escape(text)}</p>" for text in closing_notes)
+                 + f"<p>{escape(disclaimer)}</p>"
+                 f"<p>{escape(t('本程式為自由軟體，以 AGPL-3.0 授權，不提供任何擔保。原始碼：'))}"
                  f"<a href='{escape(source_url, quote=True)}'>{escape(source_url)}</a></p></div>")
     parts.append("</body></html>")
     return "".join(parts)

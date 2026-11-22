@@ -18,6 +18,7 @@ try:
 except ImportError:  # the in-browser build has no live source: only stored copies and the mirror
     yf = None
 
+from i18n import err, msg
 from version import SOURCE_URL
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -84,25 +85,25 @@ KNOWN_BAD_DAYS = {
 def normalize_ticker(raw):
     ticker = str(raw).strip().upper()
     if not ticker:
-        raise ValueError("請輸入 Yahoo Finance 代號，例如 0056.TW、00679B.TWO 或 SPY。")
+        raise err("請輸入 Yahoo Finance 代號，例如 0056.TW、00679B.TWO 或 SPY。")
     if not _TICKER_RE.fullmatch(ticker):
-        raise ValueError(f"代號「{ticker}」格式不正確：只能包含英數字與 . - ^ = 符號，最長 20 個字元。")
+        raise err("代號「{ticker}」格式不正確：只能包含英數字與 . - ^ = 符號，最長 20 個字元。", ticker=ticker)
     return ticker
 
 
 def validate_history(df):
     if df is None or df.empty:
-        raise ValueError("資料來源回傳空值")
+        raise err("資料來源回傳空值")
     if not {"Close", "Dividends"}.issubset(df.columns):
-        raise ValueError("資料缺少價格或配息欄位")
+        raise err("資料缺少價格或配息欄位")
     if not isinstance(df.index, pd.DatetimeIndex) or df.index.hasnans or df.index.has_duplicates:
-        raise ValueError("行情日期格式異常或包含重複日期")
+        raise err("行情日期格式異常或包含重複日期")
     prices = pd.to_numeric(df['Close'], errors='coerce').dropna()
     dividends = pd.to_numeric(df['Dividends'], errors='coerce')
     if prices.empty or not np.isfinite(prices).all() or (prices <= 0).any():
-        raise ValueError("歷史價格為空或含無效價格")
+        raise err("歷史價格為空或含無效價格")
     if not np.isfinite(dividends).all() or (dividends < 0).any():
-        raise ValueError("配息資料含缺值或無效數值，無法可靠計算現金流")
+        raise err("配息資料含缺值或無效數值，無法可靠計算現金流")
 
 
 # ------------------------------------------------------------------
@@ -198,7 +199,7 @@ def parse_index(text):
     """index.csv -> {ticker: {"name": ..., "listed": ...}}."""
     frame = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
     if "ticker" not in frame.columns:
-        raise ValueError("清單格式不正確")
+        raise err("清單格式不正確")
     return {row["ticker"]: {"name": row.get("name", ""), "listed": row.get("listed", "")}
             for _, row in frame.iterrows() if row["ticker"]}
 
@@ -274,8 +275,8 @@ def fetch_listed_etfs(attempts=5, pause=40):
         entries = parse_listed_etfs(html)
         if len(entries) >= 50:          # a refusal page, or a page cut short, has none or very few
             return entries
-        last = ValueError(f"清單只有 {len(entries)} 檔，可能被拒絕或不完整")
-    raise ConnectionError(f"無法取得上市 ETF 清單：{last}")
+        last = err("清單只有 {v1} 檔，可能被拒絕或不完整", v1=len(entries))
+    raise ConnectionError(msg("無法取得上市 ETF 清單：{last}", last=last))
 
 
 def fetch_mirror(ticker):
@@ -340,11 +341,11 @@ def _twse_get(path, **params):
             finally:
                 _twse_state["last_call"] = time.monotonic()
         else:
-            raise ConnectionError(f"證交所沒有正常回應：{last_error}") from last_error
+            raise ConnectionError(msg("證交所沒有正常回應：{last_error}", last_error=last_error)) from last_error
     if payload.get("stat") != "OK":
         if "沒有符合條件" in str(payload.get("stat", "")):
             return {"fields": [], "data": []}
-        raise ValueError(f"證交所回應異常：{payload.get('stat')}")
+        raise err("證交所回應異常：{v1}", v1=payload.get('stat'))
     return payload
 
 
@@ -427,7 +428,7 @@ def top_up_from_twse(snapshot, ticker):
 
     closes = pd.concat([twse_month_closes(stock_no, m) for m in months])
     if last not in closes.index or abs(closes[last] / snapshot.loc[last, "Close"] - 1) > 0.01:
-        raise ValueError("證交所與存檔在同一天的價格不一致，不合併")
+        raise err("證交所與存檔在同一天的價格不一致，不合併")
     new = closes[(closes.index > last) & (closes.index <= through)]
     if new.empty:
         return snapshot
@@ -438,7 +439,7 @@ def top_up_from_twse(snapshot, ticker):
             if code != stock_no or date not in added.index:
                 continue
             if kind != "息":
-                raise ValueError("補齊期間有除權，價格需要另外還原，不合併")
+                raise err("補齊期間有除權，價格需要另外還原，不合併")
             added.loc[date, "Dividends"] += value
     if "Stock Splits" in snapshot.columns:
         added["Stock Splits"] = 0.0
@@ -513,14 +514,11 @@ def load_history(ticker):
             return snapshot  # a stale but whole snapshot beats a half-merged one
     if yf is None:
         known = available_snapshots()
-        raise ValueError(
-            f"單機版無法即時查詢行情，只能使用台灣上市的 ETF（目前 {len(known)} 檔，每天自動更新），沒有 {ticker} 的資料。"
-            "請確認代號是否正確，例如 0056.TW、00878.TW。要測試其他商品，請使用網頁版。")
-    raise ValueError(
-        f"暫時無法取得 {ticker} 的完整歷史資料（已嘗試 3 次），也沒有先前存檔的資料可用。"
-        "這不代表代號不存在，也可能是來源暫時異常或限制連線；"
-        "請稍後按「重新載入行情」，並檢查代號。"
-    ) from last_error
+        raise err(("單機版無法即時查詢行情，只能使用台灣上市的 ETF（目前 {v1} 檔，每天自動更新），沒有 {ticker} 的資料。"
+                "請確認代號是否正確，例如 0056.TW、00878.TW。"
+                "要測試其他商品，請使用網頁版。"), v1=len(known), ticker=ticker)
+    raise err(("暫時無法取得 {ticker} 的完整歷史資料（已嘗試 3 次），也沒有先前存檔的資料可用。"
+            "這不代表代號不存在，也可能是來源暫時異常或限制連線；請稍後按「重新載入行情」，並檢查代號。"), ticker=ticker) from last_error
 
 
 # ------------------------------------------------------------------
@@ -531,11 +529,11 @@ def _split_factor(ratio):
     if ratio <= 1 / _SEAM_RATIO:
         n = round(1 / ratio)
         if n >= 2 and abs(ratio * n - 1) <= _SEAM_TOLERANCE:
-            return 1 / n, f"1 股拆成 {n} 股"
+            return 1 / n, msg("1 股拆成 {n} 股", n=n)
     elif ratio >= _SEAM_RATIO:
         n = round(ratio)
         if n >= 2 and abs(ratio / n - 1) <= _SEAM_TOLERANCE:
-            return float(n), f"{n} 股併成 1 股"
+            return float(n), msg("{n} 股併成 1 股", n=n)
     return None
 
 
@@ -577,7 +575,7 @@ def _fix_dividend_units(df, scale, seam_date):
         return None
     df.loc[stale, 'Dividends'] *= scale
     dates = df.index[stale]
-    return f"其中 {int(stale.sum())} 筆配息（{dates[0]:%Y-%m-%d} 至 {dates[-1]:%Y-%m-%d}）仍是分割前的單位，已一併換算"
+    return msg("其中 {v1} 筆配息（{dates:%Y-%m-%d} 至 {dates1:%Y-%m-%d}）仍是分割前的單位，已一併換算", v1=int(stale.sum()), dates=dates[0], dates1=dates[-1])
 
 
 def repair_history(df, ticker=""):
@@ -598,8 +596,7 @@ def repair_history(df, ticker=""):
             ratio = df['Close'].iloc[pos] / df['Close'].iloc[pos - 1]
             before = df.index < ts
             df.loc[before, ['Close', 'Dividends']] *= ratio
-            notes.append(f"{ts:%Y-%m-%d} 來源價格出現 {ratio - 1:+.1%} 的永久位移，與標的指數走勢不符，"
-                         "已視為資料錯誤並把當日漲跌當作 0。")
+            notes.append(msg("{ts:%Y-%m-%d} 來源價格出現 {v1:+.1%} 的永久位移，與標的指數走勢不符，已視為資料錯誤並把當日漲跌當作 0。", ts=ts, v1=ratio - 1))
 
     splits = df['Stock Splits'] if 'Stock Splits' in df.columns else None
     if splits is not None and (pd.to_numeric(splits, errors='coerce').fillna(0) != 0).any():
@@ -615,9 +612,13 @@ def repair_history(df, ticker=""):
             continue
         scale, label = found
         df.loc[df.index < ts, 'Close'] *= scale
-        note = f"{ts:%Y-%m-%d} 的價格跳動（{ratio - 1:+.1%}）符合{label}的股票分割，而來源沒有還原；已把這天之前的價格換算成同一基準"
         dividend_note = _fix_dividend_units(df, scale, ts)
-        notes.append(note + ("，" + dividend_note if dividend_note else "") + "。")
+        if dividend_note:
+            notes.append(msg("{ts:%Y-%m-%d} 的價格跳動（{jump:+.1%}）符合{label}的股票分割，而來源沒有還原；已把這天之前的價格換算成同一基準，{dividend_note}。",
+                             ts=ts, jump=ratio - 1, label=label, dividend_note=dividend_note))
+        else:
+            notes.append(msg("{ts:%Y-%m-%d} 的價格跳動（{jump:+.1%}）符合{label}的股票分割，而來源沒有還原；已把這天之前的價格換算成同一基準。",
+                             ts=ts, jump=ratio - 1, label=label))
     return df, notes
 
 
@@ -631,9 +632,9 @@ def find_anomalies(df, limit=5):
     threshold = -np.log(1 - max(_ANOMALY_FLOOR, min(0.9, _ANOMALY_SIGMAS * sigma)))
     flagged = logs[logs.abs() > threshold]
     worst = flagged.reindex(flagged.abs().sort_values(ascending=False).index[:limit]).sort_index()
-    notes = [f"{ts:%Y-%m-%d} 單日 {np.expm1(v):+.1%}" for ts, v in worst.items()]
+    notes = [msg("{ts:%Y-%m-%d} 單日 {v1:+.1%}", ts=ts, v1=np.expm1(v)) for ts, v in worst.items()]
     if len(flagged) > limit:
-        notes.append(f"另有 {len(flagged) - limit} 筆")
+        notes.append(msg("另有 {v1} 筆", v1=len(flagged) - limit))
     return notes
 
 
@@ -648,7 +649,7 @@ def monthly_data(df, pay_day, repair=True, allow_short=False):
     """
     validate_history(df)
     if not isinstance(pay_day, (int, np.integer)) or not 1 <= pay_day <= 31:
-        raise ValueError("每月扣款日必須介於 1 至 31 日。")
+        raise err("每月扣款日必須介於 1 至 31 日。")
     source = dict(df.attrs)
     df = df.copy().sort_index()
     df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
@@ -656,7 +657,7 @@ def monthly_data(df, pay_day, repair=True, allow_short=False):
     df.index = pd.to_datetime(df.index).tz_localize(None)
     df = df.dropna(subset=['Close'])
     if df.empty or (df['Close'] <= 0).any():
-        raise ValueError("歷史價格為空或含非正價格，無法回測。")
+        raise err("歷史價格為空或含非正價格，無法回測。")
 
     repairs = []
     if repair:
@@ -673,7 +674,7 @@ def monthly_data(df, pay_day, repair=True, allow_short=False):
     monthly.index = quotes.to_period('M')
     expected = pd.period_range(monthly.index.min(), monthly.index.max(), freq='M')
     if not monthly.index.equals(expected):
-        raise ValueError("歷史價格有缺漏月份，無法將跨月變動當作單月報酬；請重新載入行情。")
+        raise err("歷史價格有缺漏月份，無法將跨月變動當作單月報酬；請重新載入行情。")
 
     paid = df.loc[df['Dividends'] > 0, 'Dividends']
     period = quotes.searchsorted(paid.index, side='left')
@@ -689,14 +690,13 @@ def monthly_data(df, pay_day, repair=True, allow_short=False):
     base_month, base_close = monthly.index[0], float(monthly['Close'].iloc[0])
     monthly = monthly.dropna(subset=['Price_Return'])
     if monthly.empty and not allow_short:
-        raise too_short_error(source.get('ticker', '') or "這檔標的", df.index.min(), base_month)
+        raise too_short_error(source.get('ticker', '') or msg("這檔標的"), df.index.min(), base_month)
 
     rich = monthly['Div_Yield'] > _DIVIDEND_YIELD_CEILING
-    anomalies += [f"{m} 配息相當於股價的 {y:.1%}" for m, y in monthly.loc[rich, 'Div_Yield'].items()]
+    anomalies += [msg("{m} 配息相當於股價的 {y:.1%}", m=m, y=y) for m, y in monthly.loc[rich, 'Div_Yield'].items()]
     payers = monthly.index[monthly['Monthly_Div'] > 0]
     if len(payers) >= _MIN_PAYOUTS_FOR_GAP_CHECK and (payers[0] - monthly.index[0]).n >= _DIVIDEND_GAP_MONTHS:
-        anomalies.append(f"{monthly.index[0]} 至 {payers[0] - 1} 沒有任何配息紀錄，之後才開始有。"
-                         "如果它當時其實有配息，就是來源缺漏；這段期間的配息以 0 計")
+        anomalies.append(msg("{index} 至 {v1} 沒有任何配息紀錄，之後才開始有。如果它當時其實有配息，就是來源缺漏；這段期間的配息以 0 計", index=monthly.index[0], v1=payers[0] - 1))
 
     monthly.attrs.update(
         ticker=source.get('ticker', ''),
@@ -715,10 +715,9 @@ def monthly_data(df, pay_day, repair=True, allow_short=False):
 
 def too_short_error(ticker, first_day, base_month):
     """Why a history with a single month of prices cannot be tested yet, and what can be done."""
-    return ValueError(
-        f"{ticker} 的第一筆價格在 {pd.Timestamp(first_day):%Y-%m-%d}，目前只有一個月份的價格，還無法計算月報酬；"
-        f"沒有指定替身時，最早要等到 {pd.Period(base_month, freq='M') + 1} 有了第二筆月價才能進場。"
-        "如果想現在就測試，可以在側欄「上市前的歷史用哪一檔代替」指定一檔上市更久的 ETF，用它的舊資料補上。")
+    return err(("{ticker} 的第一筆價格在 {v1:%Y-%m-%d}，目前只有一個月份的價格，還無法計算月報酬；"
+            "沒有指定替身時，最早要等到 {v2} 有了第二筆月價才能進場。"
+            "如果想現在就測試，可以在側欄「上市前的歷史用哪一檔代替」指定一檔上市更久的 ETF，用它的舊資料補上。"), ticker=ticker, v1=pd.Timestamp(first_day), v2=pd.Period(base_month, freq='M') + 1)
 
 
 def backfill_with_proxy(asset, proxy):
@@ -783,16 +782,16 @@ def align_months(df_a, df_b=None):
         end = min(df_a.index.max(), df_b.index.max())
         a, b = df_a[df_a.index <= end], df_b[df_b.index <= end]
         if a.empty or b.empty or b.index.min() > end or len(a.index.intersection(b.index)) == 0:
-            raise ValueError("兩檔標的沒有共同可回測月份，請更換標的。")
+            raise err("兩檔標的沒有共同可回測月份，請更換標的。")
         merged = a.join(b, lsuffix='_A', rsuffix='_B', how='left')
         merged = merged.rename(columns={c: f'{c}_A' for c in ('Synthetic',) if c in merged.columns})
     else:
         merged = df_a.rename(columns={c: f'{c}_A' for c in df_a if c != 'YYYYMM'})
     if merged.empty:
-        raise ValueError("兩檔標的沒有共同可回測月份，請更換標的。")
+        raise err("兩檔標的沒有共同可回測月份，請更換標的。")
     expected = pd.period_range(merged.index.min(), merged.index.max(), freq='M')
     if not merged.index.equals(expected):
-        raise ValueError("共同資料有缺漏月份，無法安全執行逐月回測。")
+        raise err("共同資料有缺漏月份，無法安全執行逐月回測。")
     if 'Synthetic_A' not in merged.columns:
         merged['Synthetic_A'] = False
     merged.index = merged.index.to_timestamp()

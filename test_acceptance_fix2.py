@@ -206,13 +206,13 @@ class BufferPlacementTests(AppHarness, unittest.TestCase):
         self.assertEqual(widgets[loan_at + 1][1].label, "一開始預留幾個月的還款現金")
 
     def test_old_link_with_buf_keeps_its_value_and_result(self):
-        at = self.start(buf="3")
+        at = self.start(buf="3", loan="500")
         self.assertEqual(at.slider(key="buf").value, 3)
         metrics = {m.label: m.value for m in at.metric}
         self.assertEqual(metrics["初期每月應繳"], "$67,199")
         self.assertEqual(metrics["開局預留的緩衝金"], f"${3 * 67_199:,}")   # V39：預留 3 個月的還款
         got = {k: v[0] if isinstance(v, list) else v for k, v in at.query_params.items()}
-        self.assertEqual(got, {"buf": "3"})
+        self.assertEqual(got, {"buf": "3", "loan": "500", "inc": "0"})   # S46：有 loan 的舊連結，inc 當成 0 並寫進網址
 
 
 if __name__ == "__main__":
