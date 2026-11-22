@@ -19,4 +19,12 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt pyflakes
       - run: python -m pyflakes *.py pages/*.py
-      - run: python -m unittest -v
+      - if: matrix.python-version != '3.13'
+        run: python -m unittest -v
+      - if: matrix.python-version == '3.13'
+        run: pip install coverage
+      - name: Tests with coverage (report only, no threshold)
+        if: matrix.python-version == '3.13'
+        run: |
+          python -m coverage run --branch --source=. --omit='test_*.py,.venv/*,.github/*' -m unittest -v
+          python -m coverage report -m --skip-empty --ignore-errors

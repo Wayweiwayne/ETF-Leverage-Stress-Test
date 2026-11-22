@@ -347,7 +347,7 @@ class DividendFrequencyTests(unittest.TestCase):
         for interval in (1, 3, 6, 12):
             p = params(dividend_interval_months=interval, future_annual_returns=(0.0,))
             m = E._prepare_market(df, p)
-            _, _, div_a, win_lens, _ = E._history_paths(m, p)
+            _, _, div_a, _, win_lens, _ = E._history_paths(m, p)
             scenario = div_a[:, -1]                                  # entering in the latest month: all scenario
             self.assertEqual(win_lens[-1], 0)
             self.assertEqual(int((scenario > 0).sum()), 84 // interval)
@@ -362,7 +362,7 @@ class DividendFrequencyTests(unittest.TestCase):
     def test_assumed_yield_monte_carlo_follows_the_frequency_too(self):
         df = market()
         p = params(mc_dividends=E.MC_DIVIDENDS_MODEL, dividend_interval_months=3)
-        _, _, div_a = E.monte_carlo_inputs(E._prepare_market(df, p), p, np.random.RandomState(0))
+        _, _, div_a, _ = E.monte_carlo_inputs(E._prepare_market(df, p), p, np.random.RandomState(0))
         self.assertTrue((div_a[[0, 1, 3, 4]] == 0).all())
         self.assertTrue((div_a[[2, 5]] > 0).all())
 
@@ -751,7 +751,7 @@ class MonteCarloDividendTests(unittest.TestCase):
     def test_each_resampled_month_keeps_its_own_dividend(self):
         df = market(with_b=False)
         df['Div_Yield_A'] = np.linspace(0.001, 0.02, len(df))        # every month identifiable by its payout
-        m, (ret_a, _, div_a) = self.inputs(df, reinvest=False)
+        m, (ret_a, _, div_a, _) = self.inputs(df, reinvest=False)
         recorded = {round(r, 12): d for r, d in zip(m.ret_a, m.div_a)}
         expected = np.vectorize(lambda r: recorded[round(r, 12)])(ret_a)
         np.testing.assert_allclose(div_a, expected)
@@ -866,7 +866,7 @@ class SecondAssetModelTests(unittest.TestCase):
         df = self.paired(alpha=0.02)
         p = params(vol_drag=False, future_annual_returns=(0.0,))
         m = E._prepare_market(df, p)
-        ret_a, ret_b, _, win_lens, _ = E._history_paths(m, p)
+        ret_a, ret_b, _, _, win_lens, _ = E._history_paths(m, p)
         last = len(df) - 1                              # entering in the latest month: all scenario
         self.assertEqual(win_lens[last], 0)
         np.testing.assert_allclose(ret_a[:, last], 0, atol=1e-12)
@@ -876,7 +876,7 @@ class SecondAssetModelTests(unittest.TestCase):
         df = self.paired()
         p = params(future_annual_returns=(0.0,))
         m = E._prepare_market(df, p)
-        _, ret_b, _, _, _ = E._history_paths(m, p)
+        _, ret_b, _, _, _, _ = E._history_paths(m, p)
         np.testing.assert_allclose(ret_b[:, -1], np.exp(-m.decay) - 1, atol=1e-9)
 
     def test_months_before_the_second_asset_existed_are_modelled_from_the_first(self):
@@ -1252,6 +1252,90 @@ class SensitivityGridTests(unittest.TestCase):
         values = grid.to_numpy()
         np.testing.assert_array_equal(values[0], values[2])
         np.testing.assert_array_equal(values[:, 0], values[:, 2])
+
+
+class SecondAssetDividendTests(unittest.TestCase):
+    """The second asset's own payouts follow the main asset's rules: taxed, then reinvested."""
+
+    def two_assets(self, months=3, **kwargs):
+        zeros = np.zeros((months, 1))
+        defaults = dict(principal=1_000_000.0, buffer_cash=0.0, fee=0.0, reinvest=True, ratio_b=1.0,
+                        order=[E.SALARY], salary_cap=np.full((months, 1), 1e9), record=True)
+        defaults.update(kwargs)
+        return E.simulate_paths(zeros, zeros, zeros, np.array([100.0]), np.array([10.0]),
+                                np.zeros(months), **defaults)
+
+    def test_payout_of_the_second_asset_buys_more_of_it(self):
+        # A's payout (ratio_b=1) buys B in month 1; B then pays 5% of its price.
+        months = 3
+        a = np.zeros((months, 1))
+        a[0, 0] = 0.01
+        res = E.simulate_paths(np.zeros((months, 1)), np.zeros((months, 1)), a, np.array([100.0]),
+                               np.array([10.0]), np.zeros(months), principal=1_000_000.0, buffer_cash=0.0, fee=0.0,
+                               reinvest=True, ratio_b=1.0, order=[E.SALARY], salary_cap=np.full((months, 1), 1e9),
+                               record=True, div_yield_b=np.tile([[0.0], [0.05], [0.0]], (1, 1)))
+        shares_b = res.ledger["shares_b"][:, 0]
+        self.assertAlmostEqual(shares_b[0], 1_000.0)                  # A's 1% payout of 1,000,000 buys B at 10
+        self.assertAlmostEqual(shares_b[1], shares_b[0] * 1.05)       # B's own 5% payout buys B again
+
+    def test_payout_of_the_second_asset_is_taxed_like_the_first(self):
+        res = self.two_assets(div_yield_b=np.array([[0.0], [0.0], [0.0]]))
+        base = res.ledger["dividend_tax"].sum()
+        a = np.zeros((3, 1))
+        a[0, 0] = 0.01
+        with_b = E.simulate_paths(np.zeros((3, 1)), np.zeros((3, 1)), a, np.array([100.0]), np.array([10.0]),
+                                  np.zeros(3), principal=1_000_000.0, buffer_cash=0.0, fee=0.0, reinvest=True,
+                                  ratio_b=1.0, order=[E.SALARY], salary_cap=np.full((3, 1), 1e9), record=True,
+                                  dividend_tax_rate=0.10, div_yield_b=np.array([[0.0], [0.05], [0.0]]))
+        tax = with_b.ledger["dividend_tax"][:, 0]
+        self.assertAlmostEqual(tax[0], 10_000 * 0.10)                 # A's 10,000 payout, 9,000 left -> 900 shares of B
+        self.assertAlmostEqual(tax[1], 900 * 10 * 0.05 * 0.10)        # B: 900 shares x 10 x 5%
+        self.assertEqual(base, 0.0)
+
+    def test_without_second_asset_yields_nothing_changes(self):
+        a = np.zeros((3, 1))
+        a[0, 0] = 0.01
+        kw = dict(principal=1_000_000.0, buffer_cash=0.0, fee=0.0, reinvest=True, ratio_b=0.5, order=[E.SALARY],
+                  salary_cap=np.full((3, 1), 1e9))
+        plain = E.simulate_paths(np.zeros((3, 1)), np.zeros((3, 1)), a, np.array([100.0]), np.array([10.0]),
+                                 np.zeros(3), **kw)
+        zero_b = E.simulate_paths(np.zeros((3, 1)), np.zeros((3, 1)), a, np.array([100.0]), np.array([10.0]),
+                                  np.zeros(3), div_yield_b=np.zeros((3, 1)), **kw)
+        self.assertEqual(plain.lev_final[0], zero_b.lev_final[0])
+        self.assertEqual(plain.dca_final[0], zero_b.dca_final[0])
+
+    def test_history_and_monte_carlo_carry_the_second_assets_dividends(self):
+        df = market()
+        df['Div_Yield_B'] = np.where(np.arange(len(df)) % 3 == 1, 0.02, 0.0)
+        df.loc[df.index[:10], ['Price_Return_B', 'Close_B', 'Div_Yield_B']] = np.nan   # B listed later
+        p = params()
+        m = E._prepare_market(df, p)
+        _, _, _, div_b, _, _ = E._history_paths(m, p)
+        self.assertGreater(div_b.max(), 0)
+        np.testing.assert_array_equal(m.div_b[:10], 0.0)           # months B did not exist pay nothing
+        ret_a, ret_b, div_a, div_b_mc = E.monte_carlo_inputs(m, p, np.random.RandomState(0))
+        self.assertEqual(div_b_mc.shape, ret_a.shape)
+        recorded = {round(r, 12): d for r, d in zip(m.ret_a, m.div_b)}   # drawn together with the month
+        for r, d in zip(ret_a[:20, 0] + 0.0, div_b_mc[:20, 0]):
+            self.assertIn(round(r, 12), recorded)
+            self.assertEqual(recorded[round(r, 12)], d)
+
+    def test_non_paying_second_asset_leaves_results_unchanged(self):
+        df = market()
+        base = E.run(df, params(), 20)
+        df['Div_Yield_B'] = 0.0
+        paid_nothing = E.run(df, params(), 20)
+        pd.testing.assert_frame_equal(base.hist, paid_nothing.hist)
+        pd.testing.assert_frame_equal(base.mc, paid_nothing.mc)
+
+    def test_paying_second_asset_changes_results_and_yield_without_it_is_none(self):
+        df = market()
+        df['Div_Yield_B'] = 0.01
+        richer = E.run(df, params(), 20)
+        base = E.run(market(), params(), 20)
+        self.assertGreater(richer.mc['Lev_Final'].mean(), base.mc['Lev_Final'].mean())
+        m = E._prepare_market(market(with_b=False), params())
+        self.assertIsNone(E.monte_carlo_inputs(m, params(), np.random.RandomState(0))[3])
 
 
 if __name__ == '__main__':

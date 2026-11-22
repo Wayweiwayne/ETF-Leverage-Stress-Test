@@ -59,6 +59,13 @@ _TWSE_ATTEMPTS = 3
 _TWSE_MAX_MONTHS = 3
 _TWSE_FRESH_DAYS = 3
 _TWSE_CACHE_SECONDS = 3600
+# Official ex-dividend history of every listed ETF (exRight/TWT49U, one request per calendar year, from
+# 2003-05-05). Fetched only by the daily refresh job and published beside the snapshots as DIVIDENDS_FILE;
+# the app reads that file and never asks the exchange itself.
+DIVIDENDS_FILE = "dividends_twse.csv"
+_TWSE_FIRST_DAY = pd.Timestamp(2003, 5, 5)
+_ETF_CODE_RE = re.compile(r"00\d{2,4}[A-Z]?")
+_events_cache = {"at": float("-inf"), "table": None}
 _twse_lock = threading.Lock()
 _twse_state = {"last_call": float("-inf"), "dividends": {}}
 
@@ -171,7 +178,7 @@ def live_source_available():
 def _listed_extras():
     names = set()
     if os.path.isdir(SEED_DIR):
-        names |= {f[:-4] for f in os.listdir(SEED_DIR) if f.endswith(".csv")}
+        names |= {f[:-4] for f in os.listdir(SEED_DIR) if f.endswith(".csv") and f != DIVIDENDS_FILE}
     listing = os.path.join(_HERE, "data", "mirror_tickers.txt")
     if os.path.exists(listing):
         with open(listing, encoding="utf-8") as fh:
@@ -393,6 +400,183 @@ def twse_month_distributions(period, through):
     return events
 
 
+def _to_number(value):
+    return float(str(value).replace(",", "").strip())
+
+
+def parse_twse_events(payload):
+    """Dividend events of listed ETFs from one TWT49U reply, as (date, code, cash, kind) tuples.
+
+    The exchange has changed the layout over the years, so columns are found by name. Older replies
+    list the cash part ("息值") separately from the rights part; newer ones only give "權值+息值".
+    Dates are in the Republic of China calendar.
+    """
+    if not payload.get("data"):
+        return []
+    fields = payload["fields"]
+    date_col, code_col = fields.index("資料日期"), fields.index("股票代號")
+    kind_col = fields.index("權/息")
+    value_col = fields.index("息值") if "息值" in fields else fields.index("權值+息值")
+    events = []
+    for row in payload["data"]:
+        code = str(row[code_col]).strip()
+        if not _ETF_CODE_RE.fullmatch(code):
+            continue
+        events.append((_roc_date(row[date_col]), code, _to_number(row[value_col]), str(row[kind_col]).strip()))
+    return events
+
+
+def _events_frame(rows=()):
+    """A dividend table with fixed column types, also when it has no rows: Date datetime64, Code and Kind text, Cash float."""
+    frame = pd.DataFrame(list(rows), columns=["Date", "Code", "Cash", "Kind"])
+    return frame.astype({"Date": "datetime64[ns]", "Code": "object", "Cash": "float64", "Kind": "object"})
+
+
+def fetch_twse_events(known=None, years_done=(), today=None, log=print):
+    """Bring the official dividend table up to date. Returns (table, years covered).
+
+    `known` is the table so far. Years already covered are not fetched again, except last year and
+    this one, which can still change. A year that fails keeps whatever the table had for it and is
+    tried again next time, so one bad reply never loses data. A request covers a whole calendar year.
+    """
+    today = today if today is not None else _today()
+    last_day = today - pd.Timedelta(days=1)   # the exchange refuses ranges that reach the current day
+    table = _events_frame() if known is None else _events_frame(known[["Date", "Code", "Cash", "Kind"]].itertuples(index=False))
+    done = set(years_done)
+    for year in range(_TWSE_FIRST_DAY.year, today.year + 1):
+        if year in done and year < today.year - 1:
+            continue
+        start = max(pd.Timestamp(year, 1, 1), _TWSE_FIRST_DAY)
+        end = min(pd.Timestamp(year, 12, 31), last_day)
+        if end < start:
+            continue
+        try:
+            payload = _twse_get("exRight/TWT49U", startDate=start.strftime("%Y%m%d"), endDate=end.strftime("%Y%m%d"))
+            events = parse_twse_events(payload)
+        except (OSError, ValueError, KeyError, IndexError) as exc:   # a refusal, an error status or an unexpected layout
+            log(f"dividends {year}: FAILED ({exc})")
+            continue
+        kept = table[table["Date"].dt.year != year]
+        fresh = _events_frame(events)
+        table = _events_frame(list(kept.itertuples(index=False)) + list(fresh.itertuples(index=False)))
+        done.add(year)
+        log(f"dividends {year}: {len(fresh)} ETF events")
+    table = _events_frame(table.drop_duplicates().sort_values(["Date", "Code"]).itertuples(index=False))
+    return table, sorted(done)
+
+
+def write_dividend_events(table, years, directory):
+    """Write the table as DIVIDENDS_FILE: columns Date, Code, Cash (per unit, in that day's price units), Kind."""
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, DIVIDENDS_FILE)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    out = _events_frame(table[["Date", "Code", "Cash", "Kind"]].itertuples(index=False))
+    out["Date"] = out["Date"].dt.strftime("%Y-%m-%d")
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        fh.write(f"# fetched_at={_now()}\n# years={','.join(str(y) for y in years)}\n")
+        out.to_csv(fh, index=False)
+    os.replace(tmp, path)
+    return path
+
+
+def parse_dividend_events(text):
+    """DIVIDENDS_FILE text -> table with attrs fetched_at and years, or None if unusable."""
+    try:
+        comments = [line[1:].strip() for line in text.split("\n") if line.startswith("#")]
+        table = pd.read_csv(io.StringIO(text), comment="#", dtype={"Code": str, "Kind": str})
+        if not {"Date", "Code", "Cash", "Kind"}.issubset(table.columns) or table["Cash"].isna().any():
+            return None
+        table = _events_frame(table[["Date", "Code", "Cash", "Kind"]].itertuples(index=False))
+    except (ValueError, KeyError):
+        return None
+    meta = dict(c.split("=", 1) for c in comments if "=" in c)
+    table.attrs.update(fetched_at=meta.get("fetched_at", ""),
+                       years=[int(y) for y in meta.get("years", "").split(",") if y.strip().isdigit()])
+    return table
+
+
+def _stored_events(directory):
+    if not directory:
+        return None
+    try:
+        with open(os.path.join(directory, DIVIDENDS_FILE), encoding="utf-8") as fh:
+            return parse_dividend_events(fh.read())
+    except OSError:
+        return None
+
+
+def dividend_events():
+    """The official dividend table, or None when it cannot be read. Cached for an hour.
+
+    Same order as the price snapshots: a recent local copy, then the daily published one, then any
+    older local copy, then the shipped one.
+    """
+    with _state_lock:
+        if time.monotonic() - _events_cache["at"] < _MIRROR_MISS_SECONDS:
+            return _events_cache["table"]
+    table = _stored_events(SNAPSHOT_DIR)
+    if table is None or _age_hours(table) > SNAPSHOT_MAX_AGE_HOURS:
+        fresh = None
+        if MIRROR_URL:
+            try:
+                fresh = parse_dividend_events(_http_get_text(f"{MIRROR_URL}/{DIVIDENDS_FILE}", timeout=15))
+            except (OSError, ValueError):
+                fresh = None
+        if fresh is not None and SNAPSHOT_DIR:
+            try:
+                write_dividend_events(fresh, fresh.attrs["years"], SNAPSHOT_DIR)
+            except OSError:
+                pass
+        table = fresh if fresh is not None else (table if table is not None else _stored_events(SEED_DIR))
+    with _state_lock:
+        _events_cache.update(at=time.monotonic(), table=table)
+    return table
+
+
+def attach_official_dividends(df, ticker):
+    """Mark a history with what the official table says about its dividends (listed ETFs only).
+
+    Sets `official_dividends` (a Date/Cash frame, possibly empty) when the table has the ETF, and
+    `official_status` to "official", "missing" (table readable, ETF absent) or "unavailable" (no table).
+    Other tickers are returned untouched.
+    """
+    ticker = normalize_ticker(ticker)
+    if not ticker.endswith(".TW") or not _ETF_CODE_RE.fullmatch(ticker[:-3]):
+        return df
+    table = dividend_events()
+    df = df.copy()
+    if table is None:
+        df.attrs.update(official_status="unavailable", official_dividends=None)
+        return df
+    rows = table[(table["Code"] == ticker[:-3]) & (table["Kind"] != "權")]
+    if rows.empty:
+        df.attrs.update(official_status="missing", official_dividends=None)
+    else:
+        df.attrs.update(official_status="official", official_dividends=rows[["Date", "Cash"]].reset_index(drop=True))
+    return df
+
+
+def _official_dividend_series(df, raw_close, events):
+    """Official cash dividends placed on the repaired price basis of `df`.
+
+    The exchange quotes each dividend in the price units of its own day. Price repair (a split the
+    source never adjusted) and splits the source did report both move earlier prices onto today's
+    units, so a dividend is converted by the same factor as the close on its day.
+    """
+    factor = df["Close"] / raw_close
+    if "Stock Splits" in df.columns:
+        splits = pd.to_numeric(df["Stock Splits"], errors="coerce").fillna(0.0)
+        ratio = splits.where(splits > 0, 1.0)
+        later = ratio[::-1].cumprod()[::-1].shift(-1).fillna(1.0)   # splits strictly after each day
+        factor = factor / later
+    out = pd.Series(0.0, index=df.index)
+    for date, cash in zip(events["Date"], events["Cash"]):
+        pos = df.index.searchsorted(date)
+        if pos < len(df.index) and date >= df.index[0]:
+            out.iloc[pos] += cash * float(factor.iloc[pos])
+    return out
+
+
 # Taiwan has kept UTC+8 without daylight saving since 1979. A fixed offset needs no time-zone
 # database, which the in-browser build (Pyodide) does not have.
 TAIPEI = timezone(timedelta(hours=8), "Asia/Taipei")
@@ -578,12 +762,13 @@ def _fix_dividend_units(df, scale, seam_date):
     return msg("其中 {v1} 筆配息（{dates:%Y-%m-%d} 至 {dates1:%Y-%m-%d}）仍是分割前的單位，已一併換算", v1=int(stale.sum()), dates=dates[0], dates1=dates[-1])
 
 
-def repair_history(df, ticker=""):
+def repair_history(df, ticker="", fix_units=True):
     """Undo price seams the source left in. Returns the repaired frame and a note per repair.
 
     Handles (1) splits that were never back-adjusted, recognised as a one-day jump of a whole
     ratio in a ticker for which the source reports no split events at all, and (2) the curated
-    KNOWN_BAD_DAYS. A ticker whose split events are reported is left alone: there a large move
+    KNOWN_BAD_DAYS. `fix_units=False` leaves dividends alone (official ones are converted separately).
+    A ticker whose split events are reported is left alone: there a large move
     is more likely real, and it is surfaced by find_anomalies instead.
     """
     df = df.copy()
@@ -612,7 +797,7 @@ def repair_history(df, ticker=""):
             continue
         scale, label = found
         df.loc[df.index < ts, 'Close'] *= scale
-        dividend_note = _fix_dividend_units(df, scale, ts)
+        dividend_note = _fix_dividend_units(df, scale, ts) if fix_units else None
         if dividend_note:
             notes.append(msg("{ts:%Y-%m-%d} 的價格跳動（{jump:+.1%}）符合{label}的股票分割，而來源沒有還原；已把這天之前的價格換算成同一基準，{dividend_note}。",
                              ts=ts, jump=ratio - 1, label=label, dividend_note=dividend_note))
@@ -659,10 +844,19 @@ def monthly_data(df, pay_day, repair=True, allow_short=False):
     if df.empty or (df['Close'] <= 0).any():
         raise err("歷史價格為空或含非正價格，無法回測。")
 
+    official = source.get('official_dividends')
+    status = source.get('official_status', '')
+    raw_close = df['Close'].copy()
     repairs = []
     if repair:
-        df, repairs = repair_history(df, source.get('ticker', ''))
+        df, repairs = repair_history(df, source.get('ticker', ''), fix_units=official is None)
     anomalies = find_anomalies(df)
+    if official is not None:
+        df['Dividends'] = _official_dividend_series(df, raw_close, official)
+    elif status and (df['Dividends'] > 0).any():
+        repairs.append(msg("這檔的配息用的是 Yahoo Finance 的資料，不是證交所的官方除權息資料（目前讀不到官方配息表）：單位由程式推斷，2013 年以前的配息可能缺漏。")
+                       if status == 'unavailable' else
+                       msg("這檔的配息用的是 Yahoo Finance 的資料，不是證交所的官方除權息資料（官方配息表裡沒有這檔）：單位由程式推斷，2013 年以前的配息可能缺漏。"))
 
     selected = []
     for _, group in df.groupby(df.index.to_period('M')):
@@ -703,6 +897,7 @@ def monthly_data(df, pay_day, repair=True, allow_short=False):
         data_source=source.get('data_source', 'live'),
         fetched_at=source.get('fetched_at', ''),
         topped_up_to=source.get('topped_up_to', ''),
+        dividend_source='twse' if official is not None else 'yahoo',
         source_start=df.index.min().strftime('%Y-%m-%d'),
         source_end=df.index.max().strftime('%Y-%m-%d'),
         repairs=repairs,
@@ -821,6 +1016,26 @@ def refresh_snapshots(tickers, directory, pause=0.2):
     return live
 
 
+def refresh_dividend_events(directory, log=print):
+    """Update DIVIDENDS_FILE in `directory` from the exchange. Returns the number of years now covered.
+
+    The table so far comes from `directory`, else from the published mirror, so only new years and
+    the two latest are fetched. A failed year leaves the old table as it was.
+    """
+    known = _stored_events(directory)
+    if known is None and MIRROR_URL:
+        try:
+            known = parse_dividend_events(_http_get_text(f"{MIRROR_URL}/{DIVIDENDS_FILE}", timeout=30))
+        except (OSError, ValueError):
+            known = None
+    started = time.monotonic()
+    table, years = fetch_twse_events(known, known.attrs["years"] if known is not None else (), log=log)
+    log(f"dividends: {len(table)} events, {len(years)} years covered, {time.monotonic() - started:.0f} s")
+    if years:
+        log(f"dividends -> {write_dividend_events(table, years, directory)}")
+    return len(years)
+
+
 def mirror_universe(extra):
     """What the daily refresh publishes: every listed ETF plus `extra`, as {ticker: {"name", "listed"}}.
 
@@ -846,8 +1061,14 @@ if __name__ == "__main__":
     parser.add_argument("--file", help="text file with one symbol per line (# starts a comment)")
     parser.add_argument("--listed-etfs", action="store_true",
                         help="also every ETF listed on the Taiwan Stock Exchange, and write index.csv")
+    parser.add_argument("--twse-dividends", action="store_true",
+                        help=f"also update {DIVIDENDS_FILE}, the exchange's official dividend history (incremental)")
+    parser.add_argument("--dividends-only", action="store_true",
+                        help=f"only update {DIVIDENDS_FILE}; no price snapshots")
     parser.add_argument("--dir", default=SEED_DIR, help="folder to write to (default: data/snapshots)")
     cli = parser.parse_args()
+    if cli.dividends_only:
+        sys.exit(0 if refresh_dividend_events(cli.dir) else 1)
     symbols = list(cli.tickers)
     if cli.file:
         with open(cli.file, encoding="utf-8") as fh:
@@ -858,6 +1079,8 @@ if __name__ == "__main__":
     if not symbols:
         parser.error("no tickers given")
     succeeded = refresh_snapshots(symbols, cli.dir)
+    if cli.twse_dividends:
+        refresh_dividend_events(cli.dir)   # a failure here keeps the published table; prices still go out
     if cli.listed_etfs:
         published = {t: e for t, e in universe.items() if os.path.exists(os.path.join(cli.dir, f"{t}.csv"))}
         print(f"index: {len(published)} tickers -> {write_index(published, cli.dir)}")

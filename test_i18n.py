@@ -82,7 +82,7 @@ RAW_OK = {
     "main_page.py": {"（", "）"},
     "safety_limit.py": {" 萬"},                # the Chinese-only branch of the amount labels
     "credit_limit.py": {" 萬"},
-    "market_data.py": {"上市", "日期", "收盤價", "資料日期", "股票代號", "權值+息值", "權/息", "息", "沒有符合條件"},
+    "market_data.py": {"上市", "日期", "收盤價", "資料日期", "股票代號", "權值+息值", "權/息", "息", "息值", "沒有符合條件"},
 }
 
 
