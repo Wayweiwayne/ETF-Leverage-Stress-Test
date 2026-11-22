@@ -2,7 +2,7 @@
 
 > 借錢投資，撐得住每月還款嗎？——一個以「破產風險」為核心的槓桿投資壓力測試系統。
 
-**🔗 線上試用：** https://etf-leverage-stress-test.streamlit.app　｜　[English README](README.en.md)
+**🔗 線上試用：** [etf-leverage-stress-test.streamlit.app](https://etf-leverage-stress-test.streamlit.app) ｜ [English README](README.en.md)
 
 ![主畫面：貸款條件、每月應繳金額，以及歷史回測與蒙地卡羅模擬的破產機率](docs/images/overview.png)
 
