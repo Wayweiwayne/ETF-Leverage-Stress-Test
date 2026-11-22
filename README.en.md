@@ -2,7 +2,7 @@
 
 > You borrowed to invest. Can you keep making the monthly payment? A stress-testing tool for leveraged investing, built around the risk of running out of cash.
 
-**🔗 Live demo:** https://etf-leverage-stress-test.streamlit.app　|　[中文說明](README.md)
+**🔗 Live demo:** [etf-leverage-stress-test.streamlit.app](https://etf-leverage-stress-test.streamlit.app) | [中文說明](README.md)
 
 The app's interface is in Traditional Chinese.
 
