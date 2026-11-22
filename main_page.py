@@ -19,7 +19,7 @@ import ui_state as ui
 from i18n import msg, nt, t
 from market_data import (load_history, monthly_data, align_months, backfill_with_proxy, normalize_ticker,
                          request_live, live_source_available, available_snapshots, listing_info,
-                         too_short_error, taipei_now)
+                         too_short_error, taipei_now, attach_official_dividends)
 from version import APP_VERSION, DISCLAIMER, SOURCE_URL
 
 LOAN_TYPES = ["理財型房貸（年限長，可設寬限期）", "一般信貸（年限短，通常無寬限期）"]
@@ -669,7 +669,7 @@ params = engine.SimParams(
 @st.cache_data(ttl=3600, max_entries=64)
 def fetch_pure_asset_data(ticker, pay_day, repair, allow_short=False):
     # Exceptions propagate so unsuccessful requests are never cached.
-    return monthly_data(load_history(ticker), pay_day, repair=repair, allow_short=allow_short)
+    return monthly_data(attach_official_dividends(load_history(ticker), ticker), pay_day, repair=repair, allow_short=allow_short)
 
 
 @st.cache_data(ttl=3600, max_entries=32, show_spinner=False)

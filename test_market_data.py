@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 import urllib.error
@@ -1007,6 +1008,297 @@ class TaiwanTimeTests(unittest.TestCase):
         self.assertIsNone(today.tzinfo)
         self.assertEqual(today, today.normalize())
         self.assertEqual(today, now.tz_localize(None).normalize())
+
+NEW_FIELDS = ["資料日期", "股票代號", "股票名稱", "除權息前收盤價", "除權息參考價", "權值+息值", "權/息", "漲停價格",
+              "跌停價格", "開盤競價基準", "減除股利參考價", "詳細資料", "最近一次申報資料 季別/日期",
+              "最近一次申報每股 (單位)淨值", "最近一次申報每股 (單位)盈餘"]
+OLD_FIELDS = ["資料日期", "股票代號", "股票名稱", "除權息前收盤價", "除權息參考價", "權值", "息值", "權值+息值", "權/息",
+              "漲停價格", "跌停價格", "開盤競價基準", "減除股利參考價", "詳細資料", "最近一次申報資料 季別/日期",
+              "最近一次申報每股 (單位)淨值", "最近一次申報每股 (單位)盈餘"]
+
+
+def new_row(date, code, value, kind="息"):
+    return [date, code, "名稱", "198.05", "195.35", value, kind] + ["0"] * 8
+
+
+def old_row(date, code, value, kind="息"):
+    return [date, code, "名稱", "50.0", "48.0", 0.0, float(value), value, kind] + ["0"] * 8
+
+
+class OfficialDividendTests(IsolatedSnapshots):
+    """The exchange's ex-dividend table (exRight/TWT49U): parsing, incremental fetch, storage and use."""
+
+    def setUp(self):
+        super().setUp()
+        market_data._events_cache.update(at=float("-inf"), table=None)
+        self.addCleanup(market_data._events_cache.update, at=float("-inf"), table=None)
+
+    def reply(self, fields, rows):
+        return {"stat": "OK", "fields": fields, "data": rows}
+
+    # ----- parsing -----
+    def test_new_layout_with_republic_dates_commas_and_non_etf_rows(self):
+        payload = self.reply(NEW_FIELDS, [new_row("114年01月17日", "0050", "2.70"),
+                                          new_row("114年01月17日", "2330", "5.00"),
+                                          new_row("114年07月21日", "00631L", "1,000.5", "權"),
+                                          new_row("114年07月21日", "00679B", "0.36")])
+        self.assertEqual(market_data.parse_twse_events(payload),
+                         [(pd.Timestamp("2025-01-17"), "0050", 2.70, "息"),
+                          (pd.Timestamp("2025-07-21"), "00631L", 1000.5, "權"),
+                          (pd.Timestamp("2025-07-21"), "00679B", 0.36, "息")])
+
+    def test_old_layout_is_read_by_field_name_not_position(self):
+        payload = self.reply(OLD_FIELDS, [old_row("94/05/19", "0050", 1.85), old_row("97/05/15", "0015", 0.961),
+                                          old_row("97/05/15", "1101", 1.0)])
+        events = market_data.parse_twse_events(payload)
+        self.assertEqual([(d.strftime("%Y-%m-%d"), c, v) for d, c, v, _ in events],
+                         [("2005-05-19", "0050", 1.85), ("2008-05-15", "0015", 0.961)])
+
+    def test_empty_reply_and_missing_column(self):
+        self.assertEqual(market_data.parse_twse_events({"fields": [], "data": []}), [])
+        with self.assertRaises(ValueError):
+            market_data.parse_twse_events(self.reply(["資料日期", "股票代號"], [["114/01/01", "0050"]]))
+
+    # ----- incremental fetch -----
+    def serve_years(self, failing=()):
+        self.asked = []
+
+        def answer(path, **params):
+            self.assertEqual(path, "exRight/TWT49U")
+            year = int(params["startDate"][:4])
+            self.asked.append((params["startDate"], params["endDate"]))
+            if year in failing:
+                raise ConnectionError("firewall")
+            return self.reply(NEW_FIELDS, [new_row(f"{year - 1911}年03月10日", "0056", f"{year - 2000}.5")])
+        self.twse_get.side_effect = answer
+
+    def test_full_fetch_from_2003_one_request_per_year(self):
+        self.serve_years()
+        table, years = market_data.fetch_twse_events(today=pd.Timestamp("2026-11-23"), log=lambda *_: None)
+        self.assertEqual(years, list(range(2003, 2027)))
+        self.assertEqual(self.asked[0], ("20030505", "20031231"))       # the exchange refuses earlier starts
+        self.assertEqual(self.asked[-1], ("20260101", "20261122"))      # never reaches the current day
+        self.assertEqual(len(table), 24)
+        self.assertEqual(table["Date"].is_monotonic_increasing, True)
+
+    def test_second_run_refetches_only_last_and_this_year(self):
+        self.serve_years()
+        today = pd.Timestamp("2026-11-23")
+        table, years = market_data.fetch_twse_events(today=today, log=lambda *_: None)
+        self.serve_years()
+        again, years2 = market_data.fetch_twse_events(table, years, today=today, log=lambda *_: None)
+        self.assertEqual([a[0][:4] for a in self.asked], ["2025", "2026"])
+        self.assertEqual((len(again), years2), (24, years))              # replaced, not duplicated
+
+    def test_failed_year_keeps_old_rows_and_is_retried_next_time(self):
+        self.serve_years()
+        today = pd.Timestamp("2026-11-23")
+        table, years = market_data.fetch_twse_events(today=today, log=lambda *_: None)
+        self.serve_years(failing=(2026,))
+        logs = []
+        kept, years2 = market_data.fetch_twse_events(table, years, today=today, log=logs.append)
+        self.assertEqual(len(kept), 24)
+        self.assertTrue(any("2026" in line and "FAILED" in line for line in logs))
+        self.serve_years(failing=(2005, 2006))
+        partial, years3 = market_data.fetch_twse_events(None, (), today=today, log=lambda *_: None)
+        self.assertNotIn(2005, years3)
+        self.assertEqual(len(partial), 22)
+
+    def test_nothing_to_ask_on_new_years_day(self):
+        self.serve_years()
+        _, years = market_data.fetch_twse_events(None, list(range(2003, 2026)), today=pd.Timestamp("2026-01-01"),
+                                                 log=lambda *_: None)
+        self.assertEqual([a[0][:4] for a in self.asked], ["2025"])       # 2026 has no finished day yet
+        self.assertNotIn(2026, years)
+
+    # ----- file format -----
+    def table(self):
+        return pd.DataFrame([(pd.Timestamp("2025-01-17"), "0050", 2.7, "息"), (pd.Timestamp("2025-07-21"), "0050", 0.36, "息"),
+                             (pd.Timestamp("2024-07-16"), "006208", 0.783, "息")], columns=["Date", "Code", "Cash", "Kind"])
+
+    def test_file_round_trip_keeps_codes_as_text_and_the_years(self):
+        directory = os.path.join(self.cache_dir, "out")
+        path = market_data.write_dividend_events(self.table(), [2024, 2025], directory)
+        self.assertEqual(os.path.basename(path), "dividends_twse.csv")
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().split("\n")
+        self.assertTrue(lines[0].startswith("# fetched_at=") and lines[1] == "# years=2024,2025")
+        self.assertEqual(lines[2], "Date,Code,Cash,Kind")
+        back = market_data._stored_events(directory)
+        self.assertEqual(back.attrs["years"], [2024, 2025])
+        self.assertEqual(sorted(back["Code"]), ["0050", "0050", "006208"])
+        self.assertEqual(back["Cash"].sum(), self.table()["Cash"].sum())
+
+    def test_unusable_files_are_ignored(self):
+        for text in ("", "Date,Code\n2025-01-01,0050\n", "Date,Code,Cash,Kind\n2025-01-01,0050,,息\n", "<html>nope</html>"):
+            self.assertIsNone(market_data.parse_dividend_events(text))
+
+    def test_the_dividend_file_is_not_mistaken_for_a_ticker(self):
+        os.makedirs(self.seed_dir)
+        for name in ("0056.TW.csv", market_data.DIVIDENDS_FILE):
+            open(os.path.join(self.seed_dir, name), "w").close()
+        self.assertEqual(market_data._listed_extras() & {"0056.TW", "dividends_twse"}, {"0056.TW"})
+
+    # ----- reading the published table -----
+    def publish(self, text):
+        patcher = patch.object(market_data, "_http_get_text", return_value=text)
+        mocked = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.start_patch("MIRROR_URL", "https://mirror.test/data")
+        return mocked
+
+    def start_patch(self, name, value=None, **kwargs):
+        patcher = patch.object(market_data, name, value, **kwargs) if not kwargs else patch.object(market_data, name, **kwargs)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_table_is_read_from_the_mirror_saved_locally_and_cached(self):
+        directory = os.path.join(self.cache_dir, "pub")
+        market_data.write_dividend_events(self.table(), [2025], directory)
+        with open(os.path.join(directory, "dividends_twse.csv"), encoding="utf-8") as fh:
+            mocked = self.publish(fh.read())
+        table = market_data.dividend_events()
+        self.assertEqual(len(table), 3)
+        self.assertEqual(mocked.call_args[0][0], "https://mirror.test/data/dividends_twse.csv")
+        self.assertTrue(os.path.exists(os.path.join(self.cache_dir, "dividends_twse.csv")))
+        market_data.dividend_events()
+        self.assertEqual(mocked.call_count, 1)                           # cached for the hour
+
+    def test_old_local_copy_is_used_when_the_mirror_is_down(self):
+        market_data.write_dividend_events(self.table(), [2025], self.cache_dir)
+        self.start_patch("MIRROR_URL", "https://mirror.test/data")
+        self.start_patch("_http_get_text", side_effect=OSError("down"))
+        self.assertEqual(len(market_data.dividend_events()), 3)
+
+    def test_no_table_anywhere_gives_none(self):
+        self.assertIsNone(market_data.dividend_events())
+
+    # ----- using it -----
+    def history_with(self, status, rows=None, yahoo=None, ticker="0050.TW", ratio=1):
+        """Daily history 2023-2025 with an unadjusted 1:4 split on 2025-06-10 (if ratio=4) and Yahoo's own dividends."""
+        df = daily("2023-01-02", "2025-12-31", price=100.0, vol=0.002)
+        if ratio != 1:
+            df = split_at(df, "2025-06-10", ratio)
+        for day, amount in (yahoo or {}).items():
+            pay(df, day, amount)
+        df.attrs.update(ticker=ticker, data_source="live", official_status=status,
+                        official_dividends=pd.DataFrame(rows, columns=["Date", "Cash"]) if rows is not None else None)
+        return df
+
+    def yearly(self, monthly):
+        return monthly.groupby(monthly.index.year)["Monthly_Div"].sum()
+
+    def test_official_dividends_replace_yahoos_and_are_not_unit_guessed(self):
+        rows = [(pd.Timestamp("2024-01-17"), 3.0), (pd.Timestamp("2024-07-16"), 1.0)]
+        df = self.history_with("official", rows, yahoo={"2023-03-01": 9.0, "2024-01-17": 7.0})
+        m = monthly_data(df, 1)
+        self.assertEqual(m.attrs["dividend_source"], "twse")
+        self.assertEqual(self.yearly(m).to_dict(), {2023: 0.0, 2024: 4.0, 2025: 0.0})   # 2023 had none officially
+        self.assertEqual([x for x in m.attrs["repairs"] if "Yahoo" in str(x)], [])
+
+    def test_dividends_before_an_unadjusted_split_are_converted_with_the_prices(self):
+        rows = [(pd.Timestamp("2025-01-17"), 2.70), (pd.Timestamp("2025-07-21"), 0.36)]
+        df = self.history_with("official", rows, ratio=4, yahoo={"2025-01-17": 2.70})
+        m = monthly_data(df, 1)
+        self.assertEqual(len(m.attrs["repairs"]), 1)
+        paid = m[m["Monthly_Div"] > 0]["Monthly_Div"]
+        self.assertAlmostEqual(paid.iloc[0], 2.70 / 4)                   # pre-split cash on the post-split basis
+        self.assertAlmostEqual(paid.iloc[1], 0.36)                       # already in new units
+        self.assertTrue(all("仍是分割前" not in str(r) for r in m.attrs["repairs"]))
+
+    def test_dividends_before_a_split_the_source_reported_are_converted_too(self):
+        df = daily("2023-01-02", "2025-12-31", price=100.0, vol=0.002)
+        df["Stock Splits"] = 0.0
+        df.loc[pd.Timestamp("2025-06-10"), "Stock Splits"] = 4.0          # Yahoo back-adjusted the prices itself
+        df.attrs.update(ticker="0050.TW", official_status="official",
+                        official_dividends=pd.DataFrame([(pd.Timestamp("2025-01-17"), 2.0), (pd.Timestamp("2025-07-21"), 0.5)],
+                                                        columns=["Date", "Cash"]))
+        paid = monthly_data(df, 1)
+        paid = paid[paid["Monthly_Div"] > 0]["Monthly_Div"]
+        self.assertAlmostEqual(paid.iloc[0], 0.5)
+        self.assertAlmostEqual(paid.iloc[1], 0.5)
+
+    def test_official_dividends_reach_back_before_yahoos_record(self):
+        df = daily("2005-01-03", "2014-12-31", price=40.0)
+        df.attrs.update(ticker="0050.TW", official_status="official",
+                        official_dividends=pd.DataFrame([(pd.Timestamp("2005-05-19"), 1.85), (pd.Timestamp("2008-10-24"), 2.0)],
+                                                        columns=["Date", "Cash"]))
+        m = monthly_data(df, 1)
+        self.assertEqual(self.yearly(m)[2005], 1.85)
+        self.assertEqual(self.yearly(m)[2008], 2.0)
+
+    def test_events_outside_the_price_record_are_ignored(self):
+        df = self.history_with("official", [(pd.Timestamp("2020-01-01"), 1.0), (pd.Timestamp("2026-03-01"), 1.0)])
+        self.assertEqual(self.yearly(monthly_data(df, 1)).sum(), 0.0)
+
+    def test_fallback_keeps_yahoo_dividends_and_says_so(self):
+        for status in ("unavailable", "missing"):
+            with self.subTest(status=status):
+                df = self.history_with(status, None, yahoo={"2024-01-17": 3.0})
+                m = monthly_data(df, 1)
+                self.assertEqual(m.attrs["dividend_source"], "yahoo")
+                self.assertEqual(self.yearly(m)[2024], 3.0)
+                self.assertTrue(any("Yahoo Finance" in str(a) for a in m.attrs["repairs"]))
+                self.assertEqual(m.attrs["anomalies"], [x for x in m.attrs["anomalies"] if "Yahoo" not in str(x)])
+
+    def test_fallback_still_guesses_units_after_a_split(self):
+        yahoo = {f"{y}-{mo}-15": 1.2 for y in (2023, 2024) for mo in ("03", "09")}
+        yahoo.update({"2025-03-15": 0.3, "2025-09-15": 0.3})
+        m = monthly_data(self.history_with("missing", None, yahoo=yahoo, ratio=4), 1)
+        self.assertTrue(any("仍是分割前" in str(r) for r in m.attrs["repairs"]))
+
+    def test_no_note_when_neither_source_has_dividends(self):
+        m = monthly_data(self.history_with("missing", None, ticker="00631L.TW"), 1)
+        self.assertEqual([a for a in m.attrs["repairs"] if "Yahoo" in str(a)], [])
+
+    def test_attach_marks_listed_etfs_only(self):
+        market_data._events_cache.update(at=time.monotonic(), table=self.table())
+        raw = daily("2024-01-02", "2024-12-31")
+        self.assertEqual(market_data.attach_official_dividends(raw, "0050.TW").attrs["official_status"], "official")
+        self.assertEqual(len(market_data.attach_official_dividends(raw, "0050.TW").attrs["official_dividends"]), 2)
+        self.assertEqual(market_data.attach_official_dividends(raw, "00878.TW").attrs["official_status"], "missing")
+        for other in ("SPY", "2330.TW", "00679B.TWO"):
+            self.assertNotIn("official_status", market_data.attach_official_dividends(raw, other).attrs)
+        market_data._events_cache.update(at=time.monotonic(), table=None)
+        self.assertEqual(market_data.attach_official_dividends(raw, "0050.TW").attrs["official_status"], "unavailable")
+
+    def test_rights_only_rows_carry_no_cash(self):
+        t = self.table()
+        t.loc[0, "Kind"] = "權"
+        market_data._events_cache.update(at=time.monotonic(), table=t)
+        out = market_data.attach_official_dividends(daily("2024-01-02", "2025-12-31"), "0050.TW")
+        self.assertEqual(out.attrs["official_dividends"]["Cash"].tolist(), [0.36])
+
+    # ----- the refresh job -----
+    def test_refresh_updates_only_new_years_starting_from_the_published_table(self):
+        market_data.write_dividend_events(self.table(), list(range(2003, 2026)), os.path.join(self.cache_dir, "pub"))
+        with open(os.path.join(self.cache_dir, "pub", "dividends_twse.csv"), encoding="utf-8") as fh:
+            self.publish(fh.read())
+        self.serve_years()
+        out = os.path.join(self.cache_dir, "out")
+        with patch.object(market_data, "_today", return_value=pd.Timestamp("2026-11-23")):
+            self.assertEqual(market_data.refresh_dividend_events(out, log=lambda *_: None), 24)
+        self.assertEqual([a[0][:4] for a in self.asked], ["2025", "2026"])
+        written = market_data._stored_events(out)
+        self.assertEqual(written.attrs["years"], list(range(2003, 2027)))
+        self.assertIn("006208", set(written["Code"]))                    # the old rows came along
+
+    def test_refresh_with_every_year_failing_writes_nothing(self):
+        self.serve_years(failing=range(2003, 2030))
+        out = os.path.join(self.cache_dir, "out")
+        with patch.object(market_data, "_today", return_value=pd.Timestamp("2026-11-23")):
+            self.assertEqual(market_data.refresh_dividend_events(out, log=lambda *_: None), 0)
+        self.assertFalse(os.path.exists(os.path.join(out, "dividends_twse.csv")))
+
+    def test_price_snapshots_keep_their_old_format(self):
+        directory = os.path.join(self.cache_dir, "pub")
+        df = daily("2024-01-02", "2024-03-29")
+        df.attrs["fetched_at"] = "2024-04-01T00:00:00Z"
+        market_data.write_dividend_events(self.table(), [2025], directory)
+        path = save_snapshot(df, "0050.TW", directory)
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read().split("\n")[1], "Date,Close,Dividends")
+
 
 if __name__ == '__main__':
     unittest.main()

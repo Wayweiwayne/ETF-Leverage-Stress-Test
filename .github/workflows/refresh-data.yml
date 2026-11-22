@@ -1,7 +1,7 @@
 name: refresh market data
 
 # Downloads every ETF listed on the Taiwan Stock Exchange, plus the tickers in data/mirror_tickers.txt,
-# once a day and publishes them with an index on the market-data branch. The app reads them instead
+# once a day and publishes them, with an index and the exchange's official dividend table, on the market-data branch. The app reads them instead
 # of asking Yahoo Finance on every visit; the single-file version can only use these.
 # The branch holds a single commit that is replaced each run, so the repository does not grow.
 
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,7 +30,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Download from the live source
         # A ticker that fails keeps its previously published copy; the step fails only if none succeed.
-        run: python market_data.py --listed-etfs --file data/mirror_tickers.txt --dir published
+        run: python market_data.py --listed-etfs --file data/mirror_tickers.txt --twse-dividends --dir published
       - name: Publish
         working-directory: published
         run: |

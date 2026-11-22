@@ -162,6 +162,7 @@ class _Market:
     n: int
     ret_a: np.ndarray
     div_a: np.ndarray
+    div_b: np.ndarray
     close_a: np.ndarray
     synthetic_a: np.ndarray
     has_b: bool
@@ -306,7 +307,7 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
                    fee, reinvest, ratio_b, order, salary_cap, haircut_trigger=1.0, haircut_penalty=0.0,
                    dca_mode=DCA_MATCH_OUT_OF_POCKET, record=False, sell_tax=0.0, dividend_tax_rate=0.0,
                    nhi_rate=0.0, nhi_threshold=0.0, dividend_taxable_share=1.0, loan_fee=0.0,
-                   quantiles=None, keep_flows=False):
+                   quantiles=None, keep_flows=False, div_yield_b=None):
     """Run the leveraged strategy and its no-loan comparison over every path at once.
 
     Return/yield matrices are (months, paths); `salary_cap` has the same shape. A month's
@@ -322,6 +323,9 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     returned as well. `quantiles` asks for those quantiles of net worth across paths in every
     month (a ruined path counts as zero), and `keep_flows` for each month's salary payment and
     comparison contribution per path.
+
+    `div_yield_b` (same shape as the returns) is the second asset's own dividend yield on its previous
+    price. Its payouts are taxed and reinvested exactly like the main asset's; omitted, it pays nothing.
     """
     if dca_mode not in (DCA_MATCH_OUT_OF_POCKET, DCA_FULL_PAYMENT):
         raise err("未知的 DCA 對照模式：{dca_mode}", dca_mode=dca_mode)
@@ -365,14 +369,20 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
     for i in range(months):
         pmt = payments[i]
         ret_a_i = ret_a[i, :]
-        prev_a = prices_a
+        prev_a, prev_b = prices_a, prices_b
         prices_a = prices_a * (1 + ret_a_i)
         prices_b = prices_b * (1 + ret_b[i, :])
         div_per_share = prev_a * div_yield_a[i, :]
+        div_per_share_b = prev_b * div_yield_b[i, :] if div_yield_b is not None else None
 
         gross_div = shares_a * div_per_share
         levy = dividend_levy(gross_div)
         current_div = gross_div - levy
+        if div_per_share_b is not None:
+            gross_div_b = shares_b * div_per_share_b
+            levy_b = dividend_levy(gross_div_b)
+            current_div = current_div + gross_div_b - levy_b
+            levy = levy + levy_b
         # A second asset that has gone to zero can no longer be bought; its share of the dividend buys the first.
         share_to_b = np.where(prices_b > 0, ratio_b, 0.0)
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -423,6 +433,9 @@ def simulate_paths(ret_a, ret_b, div_yield_a, price_a0, price_b0, payments, prin
 
         dca_gross = dca_shares_a * div_per_share
         dca_divs = dca_gross - dividend_levy(dca_gross)
+        if div_per_share_b is not None:
+            dca_gross_b = dca_shares_b * div_per_share_b
+            dca_divs = dca_divs + dca_gross_b - dividend_levy(dca_gross_b)
         with np.errstate(divide='ignore', invalid='ignore'):
             if reinvest:
                 dca_shares_b = dca_shares_b + np.where(prices_b > 0, (dca_divs * share_to_b * (1 - fee)) / prices_b, 0.0)
@@ -639,7 +652,7 @@ def monte_carlo_inputs(m, p, rng):
     A resampled month brings its price return, the second asset's return and, unless the
     assumed-yield model is chosen, the dividend actually paid that month. Drawing them together
     keeps a payout next to the ex-dividend price drop it caused, and gives an asset that never
-    paid anything no dividends.
+    paid anything no dividends. Returns (ret_a, ret_b, div_a, div_b); div_b is None without a second asset.
     """
     months, n_paths = p.total_months, int(p.mc_paths)
     m_disc = p.structural_discount_pct / 100.0 / 12.0
@@ -649,10 +662,12 @@ def monte_carlo_inputs(m, p, rng):
     _inject_swan(ret_a, ret_b, p.swan_month, p.swan_drop, m.beta_b, m.has_b)
     if p.mc_dividends == MC_DIVIDENDS_HISTORY:
         div_a = m.div_a[idx]
+        div_b = m.div_b[idx]
     else:
         div_a = dividend_model_yields(np.cumprod(1 + ret_a, axis=0), 1.0, p.base_div_yield, p.div_beta,
                                       m.dividend_interval)
-    return ret_a, ret_b, div_a
+        div_b = np.zeros((months, n_paths))   # the assumed-yield model has no yield for the second asset
+    return ret_a, ret_b, div_a, (div_b if m.has_b else None)
 
 
 def _future_monthly_returns(annual_returns, months):
@@ -705,11 +720,17 @@ def _prepare_market(df, p):
 
     has_b = bool(p.reinvest and "Close_B" in df.columns and df["Price_Return_B"].notna().any())
     ret_b, close_b = np.zeros(n), np.ones(n)
+    div_b = np.zeros(n)
     beta_b, resid_std_b, decay, modelled = 1.0, 0.0, 0.0, 0
     if has_b:
         ret_b = df["Price_Return_B"].to_numpy(dtype=float).copy()
         close_b = df["Close_B"].to_numpy(dtype=float).copy()
         real = ~np.isnan(ret_b)
+        if "Div_Yield_B" in df.columns and real.any():
+            raw_b = df["Div_Yield_B"].to_numpy(dtype=float)
+            paid_b = np.where(np.isnan(raw_b), 0.0, raw_b)
+            # Only months with a real record pay: before listing (proxy-modelled) and in the scenario future it pays nothing.
+            div_b = np.where(real, paid_b, 0.0)
         if real.sum() >= _MIN_OVERLAP_FOR_BETA:
             cov = np.cov(ret_a[real], ret_b[real])
             if cov[0, 0] > 0:
@@ -727,7 +748,7 @@ def _prepare_market(df, p):
             ret_b[missing] = modelled_second_asset_return(ret_a[missing], noise, beta_b, decay, p.vol_drag)
             close_b[missing] = close_b[real][0]  # only relative moves matter; any positive level will do
     interval = p.dividend_interval_months or infer_dividend_interval(div_a)
-    return _Market(n, ret_a, div_a, close_a, synthetic_a, has_b, ret_b, close_b, modelled,
+    return _Market(n, ret_a, div_a, div_b, close_a, synthetic_a, has_b, ret_b, close_b, modelled,
                    beta_b, resid_std_b, decay, int(interval))
 
 
@@ -746,6 +767,7 @@ def _history_paths(m, p):
     ret_a = np.zeros((months, n))
     ret_b = np.zeros((months, n))
     div_a = np.zeros((months, n))
+    div_b = np.zeros((months, n))
     win_lens = np.minimum(months, n - 1 - np.arange(n))
 
     for i in range(n):
@@ -756,6 +778,7 @@ def _history_paths(m, p):
         div_a[:win, i] = m.div_a[rows]
         if m.has_b:
             ret_b[:win, i] = m.ret_b[rows] - m_disc
+            div_b[:win, i] = m.div_b[rows]
         if fut > 0:
             mr = future[:fut] - m_disc
             ret_a[win:, i] = mr
@@ -776,7 +799,7 @@ def _history_paths(m, p):
     # An entry month counts as backfilled when it, or any real month it relies on, uses proxy data.
     synthetic_before = np.concatenate(([0], np.cumsum(m.synthetic_a)))
     backfilled = (synthetic_before[np.arange(n) + win_lens + 1] - synthetic_before[np.arange(n)]) > 0
-    return ret_a, ret_b, div_a, win_lens, backfilled
+    return ret_a, ret_b, div_a, div_b if m.has_b else None, win_lens, backfilled
 
 
 def _history_caps(ret_a_hist, p):
@@ -822,7 +845,7 @@ def _monte_carlo(m, p, schedule, common, detail):
     """
     months, n_paths = p.total_months, int(p.mc_paths)
     any_rate, avg_months = 0.0, 0.0
-    ret_a_mc, ret_b_mc, div_a_mc = monte_carlo_inputs(m, p, np.random.RandomState(p.seed))
+    ret_a_mc, ret_b_mc, div_a_mc, div_b_mc = monte_carlo_inputs(m, p, np.random.RandomState(p.seed))
     mc_dividend_yield = float(div_a_mc.mean() * 12)
 
     if p.job_loss.mode == JOB_LOSS_RANDOM:
@@ -846,6 +869,7 @@ def _monte_carlo(m, p, schedule, common, detail):
     # Only relative price moves matter, so every path starts from a price of 1.
     mc = simulate_paths(ret_a_mc, ret_b_mc, div_a_mc, np.ones(n_paths), np.ones(n_paths),
                         salary_cap=caps_mc, quantiles=FAN_QUANTILES if detail else None, keep_flows=detail,
+                        div_yield_b=div_b_mc,
                         **{**common, "payments": payments_mc})
     return mc, any_rate, avg_months, mc_dividend_yield, rate_p5, rate_p95
 
@@ -861,11 +885,12 @@ def run_summary(df, params):
     months, n = p.total_months, m.n
 
     # --- Rolling history ---
-    ret_a_hist, ret_b_hist, div_a_hist, win_lens, backfilled = _history_paths(m, p)
+    ret_a_hist, ret_b_hist, div_a_hist, div_b_hist, win_lens, backfilled = _history_paths(m, p)
     caps_hist, reps = _history_caps(ret_a_hist, p)
     tile = (lambda x: np.tile(x, (1, reps))) if reps > 1 else (lambda x: x)
     hist = simulate_paths(tile(ret_a_hist), tile(ret_b_hist), tile(div_a_hist),
-                          np.tile(m.close_a, reps), np.tile(m.close_b, reps), salary_cap=caps_hist, **common)
+                          np.tile(m.close_a, reps), np.tile(m.close_b, reps), salary_cap=caps_hist,
+                          div_yield_b=None if div_b_hist is None else tile(div_b_hist), **common)
     ruined = hist.ruined.reshape(reps, n)
     lev = hist.lev_final.reshape(reps, n)
     dca = hist.dca_final.reshape(reps, n)
@@ -930,11 +955,12 @@ def run_trace(df, params, anchor_idx):
     m, schedule, common, _ = _setup(df, p)
     if not 0 <= anchor_idx < m.n:
         raise err("進場月份超出資料範圍。")
-    ret_a_hist, ret_b_hist, div_a_hist, _, _ = _history_paths(m, p)
+    ret_a_hist, ret_b_hist, div_a_hist, div_b_hist, _, _ = _history_paths(m, p)
     caps_hist, _ = _history_caps(ret_a_hist, p)
     col = slice(anchor_idx, anchor_idx + 1)
     one = simulate_paths(ret_a_hist[:, col], ret_b_hist[:, col], div_a_hist[:, col], m.close_a[col],
-                         m.close_b[col], salary_cap=caps_hist[:, col], record=True, **common)
+                         m.close_b[col], salary_cap=caps_hist[:, col], record=True,
+                         div_yield_b=None if div_b_hist is None else div_b_hist[:, col], **common)
     ledger = one.ledger
 
     months = p.total_months

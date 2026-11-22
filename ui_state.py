@@ -60,7 +60,7 @@ def _seed(key, default, parse):
     if raw is not None:
         try:
             value = parse(raw)
-        except (ValueError, TypeError, IndexError):
+        except (ValueError, TypeError, IndexError, OverflowError):
             value = default
     st.session_state[key] = value
 

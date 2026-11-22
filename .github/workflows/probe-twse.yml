@@ -1,33 +1,18 @@
-# Temporary: checks what the TWSE ex-rights/dividend endpoint returns. Remove after sprint 6.
+# Temporary: compares Yahoo and official TWSE dividends and times the official fetch. Remove after sprint 6.
 name: probe-twse
 on:
   push:
     branches: [claude/eloquent-lovelace-jzgzpv]
-    paths: [.github/workflows/probe-twse.yml]
+    paths: [.github/workflows/probe-twse.yml, .github/probe/**]
 jobs:
-  probe:
+  compare:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Query TWT49U
-        shell: python
-        run: |
-          import json, time, urllib.request, urllib.parse
-          base = "https://www.twse.com.tw/rwd/zh/exRight/TWT49U"
-          tests = [("20250601","20250630"),("20250101","20251231"),("20240101","20241231"),("20130101","20131231"),
-                   ("20080101","20081231"),("20050101","20051231"),("20030101","20031231"),("20000101","20001231")]
-          for s, e in tests:
-              url = base + "?" + urllib.parse.urlencode({"response": "json", "startDate": s, "endDate": e})
-              try:
-                  raw = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=30).read().decode()
-                  d = json.loads(raw)
-                  rows = d.get("data", []) or []
-                  etf = [r for r in rows if str(r[1]).startswith("00")]
-                  print("==", s, e, d.get("stat"), "rows", len(rows), "etf_rows", len(etf))
-                  print("fields", json.dumps(d.get("fields"), ensure_ascii=False))
-                  for r in etf:
-                      if str(r[1]) in ("0050", "0056", "00878", "006208", "0052", "00631L"):
-                          print("row", json.dumps(r, ensure_ascii=False))
-                  print("first_etf", json.dumps(etf[:3], ensure_ascii=False))
-              except Exception as exc:
-                  print("==", s, e, "FAILED", repr(exc))
-              time.sleep(8)
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python .github/probe/compare_dividends.py official_out

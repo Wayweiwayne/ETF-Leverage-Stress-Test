@@ -98,6 +98,8 @@ Dividends come from one of three sources, depending on the case:
 Monte Carlo uses the actual dividends by default because it recombines history. This way, the dividend lands in the same month where the price drops because of the ex-dividend date.
 An ETF that pays no dividends doesn't get any from nowhere, and the dividend level follows the ETF's own record.
 The cost is that it fully trusts the historical data: if the data source is missing a period's dividends ("Data used" on the main page lists such cases), that period counts as having no dividends, and the result is on the cautious side.
+
+**Where dividends come from.** For ETFs listed in Taiwan, dividends are the exchange's published ex-dividend records (back to May 2003, updated daily), converted to the same basis as the prices when there was a split. Yahoo Finance dividends are used only when the exchange's records cannot be read or do not list the ETF; "Data used" on the main page says so then, units are inferred by the program, and dividends before 2013 may be missing. Other instruments (for example US stocks) always use Yahoo Finance.
 """)
 
     st.subheader("How often are dividends paid? (the \"How often future dividends are paid\" setting)")
@@ -241,7 +243,7 @@ A few simplifications:
 - **Income tax is deducted when the dividend is received.** In real life it is paid in May of the next year, so cash flow is a little on the cautious side. The 5% bracket actually gets a refund, which is counted as 0 here. The NT\$80,000 household cap on the credit is not applied. The 40% bracket uses separate taxation at 28%.
 - **By default, all dividends are treated as dividend income.** ETF payouts often include capital gains and income equalization, which have no income tax or supplementary premium. You can lower "Share of the dividend that counts as dividend income" for this.
 - **The supplementary premium threshold is checked for each payment.** A large position bought with a loan usually passes it on every payment. The DCA position builds up slowly, and early payments are below NT\$20,000, so they are not charged. This difference between the two approaches really exists in real life.
-- Dividends of the second ETF are not calculated (see section 6; leveraged ETFs usually pay none).
+- If the second ETF pays dividends itself (say 0050), they follow the same rules as the first ETF's: taxed, then reinvested in the same proportion across both. Leveraged ETFs usually pay none, so their results are unaffected. Months without a real dividend record for the second ETF (before it was listed, or in the imagined future) pay nothing.
 """)
 
     # ------------------------------------------------------------------

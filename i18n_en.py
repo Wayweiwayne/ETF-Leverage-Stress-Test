@@ -1271,6 +1271,10 @@ EN = {
         "The Taiwan Stock Exchange did not respond normally: {last_error}",
     "補齊期間有除權，價格需要另外還原，不合併":
         "There was an ex-rights event in the period to fill, so prices would need a separate adjustment. Not merged",
+    "這檔的配息用的是 Yahoo Finance 的資料，不是證交所的官方除權息資料（目前讀不到官方配息表）：單位由程式推斷，2013 年以前的配息可能缺漏。":
+        "This ETF's dividends come from Yahoo Finance, not from the exchange's official ex-dividend records (the official table cannot be read right now). Units are inferred by the program, and dividends before 2013 may be missing.",
+    "這檔的配息用的是 Yahoo Finance 的資料，不是證交所的官方除權息資料（官方配息表裡沒有這檔）：單位由程式推斷，2013 年以前的配息可能缺漏。":
+        "This ETF's dividends come from Yahoo Finance, not from the exchange's official ex-dividend records (the official table does not list this ETF). Units are inferred by the program, and dividends before 2013 may be missing.",
     "1 股拆成 {n} 股":
         "a 1-for-{n}",
     "{ts:%Y-%m-%d} 來源價格出現 {v1:+.1%} 的永久位移，與標的指數走勢不符，已視為資料錯誤並把當日漲跌當作 0。":
